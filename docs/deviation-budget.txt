@@ -1,0 +1,2 @@
+# One suppression ceiling per language (EN-00.6).
+cxx = 13

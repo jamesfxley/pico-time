@@ -1,0 +1,18 @@
+name = "pico-time"
+
+[infra]
+repository = "https://github.com/jamesfxley/pico-tooling.git"
+
+[[footprint]]
+name = "ntp_sync"
+elf = "build-firmware/examples/ntp_sync/pico_time_ntp_sync.elf"
+ram_kib = 64
+flash_kib = 384
+owned_prefix = "."
+owned_kib = 12
+
+[[symbols]]
+name = "allocation (src objects)"
+mode = "objects"
+path = "build-firmware/src"
+sets = ["soft-float", "c-heap"]
