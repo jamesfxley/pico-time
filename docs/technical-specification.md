@@ -219,7 +219,7 @@ configure. Synchronisation runs over the radio, and pico-logging needs the
 RP2350's exclusive access, so the library declares `PLATFORM rp2350 CYW43` to
 the family bootstrap, which refuses a board without what a library declares. A consumer adding it on such a board fails
 at configure, naming what the board lacks, rather than in the build or on the
-device.
+device. A Pico W (RP2040) is refused at configure and the library cannot build for it (FW-1).
 
 ## 6. Gates
 
@@ -261,17 +261,17 @@ none of them is ours to change.
 | ID | Established by | Criterion |
 |---|---|---|
 | FR-1 | `wall_clock_test.cpp` `ComputeEpochOffset.ProducesTheOffsetBetweenEpochAndUptime`, `ApplyOffset.AddsTheOffsetToTheMonotonicReading` | Offset equals epoch microseconds minus the monotonic reading, and a read adds it back to the monotonic reading |
-| FR-2 | Device run | Pre-synchronization `time()` reads seconds since boot, not an epoch time |
+| FR-2 | Device run | Pre-synchronization `time()` reads seconds since boot, not an epoch time. The run on this release is pending (FW-3) |
 | FR-3 | `wall_clock_test.cpp` `ApplyOffset.ClampsANegativeResultToTheEpoch` | A negative sum yields 0 |
 | FR-4 | `wall_clock_test.cpp` `WallClock.StartsUnsynchronized`, `WallClock.PublishesAnOffsetAndLatchesSynchronized` | `synchronized()` is false before any store and true after one. That it never returns to false is structural — nothing clears the flag — and is review-only |
 | FR-5 | `wall_clock_test.cpp` `ComputeEpochOffset.EnforcesTheSecondsWindowAtItsEdges`, `.RejectsOutOfRangeMicroseconds`, `.RejectsTheSecondsForMicrosecondsMixUp` | Both window edges and 999999/1000000 classify correctly; the microseconds-for-seconds mix-up is refused rather than overflowing. That a refusal leaves the offset and the synchronization state unchanged is review-only: `apply_wall_clock_time` returns before it stores |
 | FR-6 | `wall_clock_test.cpp` `WallClock.ReadsAreNeverTornUnderAConcurrentWriter`, `.CarriesTheFullSignedRangeAcrossTheSplit`; review of `pico_util::Published`'s bounded retry | Under a concurrent writer no reader observes a value that was never stored; every value round-trips across the 32-bit split. That a read does not block, spin or disable interrupts is structural — the retry is bounded by `MAX_READ_ATTEMPTS` and the words are 32-bit atomics — and is review-only. A read that cannot be validated is reported, and `_gettimeofday` fails with `EAGAIN` on it: that path is **review-only**, since `time_keeper.cpp` builds for the target alone and exhaustion needs a writer breaking its contract mid-read, which no host case produces deterministically. |
-| FR-7 | Device run | Successive reads increase across an idle period |
+| FR-7 | Device run | Successive reads increase across an idle period. The run on this release is pending (FW-3) |
 | FR-8 | `ntp_message_test.cpp` `NtpMessage.ThePlausibilityWindowIsNarrowerThanAnNtpEra`, `.RefusesEveryEra1FieldWhileTheWindowPredatesTheRollover` | The window is narrower than an era, and a window below the rollover admits no era-1 field |
 | NR-1 | `ntp_message_test.cpp` `NtpMessage.BuildsAClientRequestCarryingTheNonce` | First byte is 0x1B |
 | NR-2 | `ntp_message_test.cpp` `NtpMessage.BuildsAClientRequestCarryingTheNonce`; `ntp_synchronizer_test.cpp` `NtpSynchronizer.GivesEachAttemptItsOwnNonce` | The nonce occupies bytes 40–47 big-endian, and a fresh one is drawn for each attempt. That the request sent carries the attempt's own nonce is review-only, of `ntp_synchronizer.cpp` |
 | NR-3 | `ntp_synchronizer_test.cpp` `TriesEveryAttemptBeforeGivingUp`, `WaitsBetweenAttemptsButNotAfterTheLast` | An unreachable server is retried `MAX_REQUEST_ATTEMPTS` times with `MAX_REQUEST_ATTEMPTS - 1` waits between them and none after the last. Transport-independent, which is what the seam is for; no device run is kept for it |
-| NR-4 | Device run | A second call returns without a DNS query |
+| NR-4 | Device run | A second call returns without a DNS query. The run on this release is pending (FW-3). Direct duration and packet capture are absent (FW-2) |
 | NR-5 | `ntp_message_test.cpp` `NtpMessage.RefusesEveryEra1FieldWhileTheWindowPredatesTheRollover`, `.AcceptsATimestampExactlyAtThePlausibilityFloor`, `.AcceptsTheSecondBelowThePlausibilityCeiling` | Both sides of the era boundary are refused under this window; both edges of the window are accepted through era 0 |
 | NR-6 | `ntp_message_test.cpp` `NtpMessage.ConvertsTheFractionExactly`; `arm-none-eabi-nm -u` over this library's objects | The conversion table holds at 0, ¼, ½, ¾ and full scale; no `__aeabi_[df]` symbol is referenced |
 | VR-1 | `ntp_message_test.cpp` `NtpMessage.RejectsAnythingButAServerReply` | Modes 0, 3 and 5 are refused with `MODE` |
@@ -292,7 +292,7 @@ none of them is ours to change.
 
 Every row whose criterion is a **device run** requires hardware and is
 established by the on-device validation in `examples/ntp_sync/`, not by the host
-suite (`EN-06.6`). Rows marked **Review** state a structural property of a
+suite (`EN-06.6`). For this release those runs are pending (FW-3). Rows marked **Review** state a structural property of a
 firmware-only translation unit that no host test can reach; they are checked by
 the
 pinned source review guide (`infra/house/guides/review/source.md`).

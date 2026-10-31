@@ -151,10 +151,10 @@ time it cannot place.
 The client resolves `pool.ntp.org` and takes the first address DNS returns.
 There is no way to name a different server, a fixed address, or a list.
 
-Adding one is small, and the reason it is absent is that the surface it implies
-is not: a caller supplying a hostname wants a list, a list wants a selection
-policy, and a selection policy wants to know which replies were good — which is
-a different library. A consumer needing a specific server today can call
+Naming a server is out of scope. The surface it implies is large: a caller
+supplying a hostname wants a list, a list wants a selection policy, and a
+selection policy wants to know which replies were good — which is a different
+library. A consumer needing a specific server can call
 `apply_wall_clock_time()` with a time it obtained itself, which is the seam
 that already exists for exactly this.
 
@@ -164,11 +164,11 @@ Synchronizing replaces the offset outright. A clock that has drifted a second
 jumps a second, which is visible to anything timestamping across the step.
 
 Disciplining — slewing the offset gradually, or measuring drift and correcting
-for it between synchronizations — would remove the jump and improve accuracy
-between polls. It also turns a stateless offset into a control loop with
-filter state, a frequency estimate and a stability criterion, none of which is
-testable without a long-running reference. The step is honest and cheap; the
-loop would be neither until there was somewhere to validate it.
+for it between synchronizations — is out of scope. It would remove the jump and
+improve accuracy between polls, but it turns a stateless offset into a control
+loop with filter state, a frequency estimate and a stability criterion, none of
+which is testable without a long-running reference. The step is honest and
+cheap; the loop would be neither.
 
 ## What this is not
 
