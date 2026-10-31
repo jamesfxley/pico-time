@@ -6,9 +6,9 @@ criterion is a device run. Those rows are properties of the SDK's monotonic
 counter, the radio and the newlib link — not of the portable core — so no host
 test can reach them.
 
-The specification is normative; this file is the run record it refers to
-(`EN-03.2`). Nothing here is a commitment, and the numbers below are
-observations of one board on one build, not gates.
+The specification is normative. This file holds the procedure and what each
+row's output should show; the run record for this release is pending (FW-2,
+FW-3). Nothing here is a commitment.
 
 ## Building and flashing
 
@@ -78,7 +78,13 @@ from the host rather than by hand at the board.
 
 ## Pending device evidence
 
-FR-2, FR-7 and NR-4 await a new authorized run of `pico_time_ntp_sync`
-from the final staged roots. Capture must be armed before the flash, record
-pre-sync and post-sync epochs, and time the second synchronization directly.
-No prior private-version run is evidence for the publication tree.
+No run record of `pico_time_ntp_sync` on this release is committed. Two items
+are pending:
+
+- FR-2, FR-7 and NR-4's functional criterion need a device run that records
+  the pre-sync and post-sync epochs, the epoch after the wait and the second
+  call's outcome (FW-3).
+- NR-4's direct timing and a packet capture over the same interval are
+  separate (FW-2).
+
+Capture must be armed before the flash.
