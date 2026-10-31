@@ -146,7 +146,7 @@ in [pinned family guides](../infra/agents/AGENTS.md).
   never repeats, which is what makes the check conclusive.
 - **Firmware is RP2350 only, and a `pico_w` configure is refused** (AR-7). The
   library declares `PLATFORM rp2350 CYW43` to the family bootstrap, because
-  pico-logging's sink and level atomics are not lock-free on the RP2040.
+  pico-logging's sink and level atomics are not lock-free on the RP2040 (FW-1).
 - `synchronize_ntp()` is blocking, requires Wi-Fi to be up, runs up to three
   DNS+NTP exchanges each bounded by `timeout` (default 10 s), and succeeds
   immediately if already synchronized. It returns a

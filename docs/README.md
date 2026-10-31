@@ -7,14 +7,15 @@
 | [technical-specification.md](technical-specification.md) | **Normative.** Requirements (`FR`/`NR`/`VR`/`AR`), gates, traceability matrix | Changing behaviour, or asking whether something is guaranteed or incidental |
 | [architecture.md](architecture.md) | Descriptive. How the implementation is put together — the host/firmware split, the wall clock's publication protocol, the attempt slot pool, lwIP configuration | Working out where a change belongs |
 | [usage-guide.md](usage-guide.md) | Practical use beyond the README: linking it, synchronizing and re-synchronizing, the plausibility window, reading the clock from an ISR | Building an application on the library |
+| [future-work.md](future-work.md) | Work deliberately not done, one entry per deferral, with its reason and cost (`EN-03.7`) | Asking whether something absent is planned, or before proposing a feature |
 | [deviations.md](deviations.md) | Standing (scope-wide) deviations from the coding standard, each with a rationale, a risk assessment and a review date | Adding or reviewing a suppression |
 | [deviation-budget.txt](deviation-budget.txt) | One suppression ceiling per language, ratcheting down. These only ever ratchet down | Same |
 | [requirement-prefixes.txt](requirement-prefixes.txt) | The pinned prefix set, checked by review (EN-02.4) | Adding a requirement under a new prefix |
 | [GitHub Releases](https://github.com/jamesfxley/pico-time/releases) | What changed in each release, and what to change in your code when an API broke | Upgrading across a release |
 
 The specification is the only normative document here. `architecture.md`
-describes what is, and work deliberately not done is an issue in the tracker
-rather than a document in the tree (`EN-03.7`).
+describes what is, and work deliberately not done is in
+[future-work.md](future-work.md) (`EN-03.7`); the issue tracker holds defects.
 
 A behaviour claimed in `README.md` or `docs/orientation.md` but absent from the
 specification is not a commitment, and a requirement is not satisfied until the

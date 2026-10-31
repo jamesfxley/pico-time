@@ -194,7 +194,8 @@ synchronized clock automatically.
 
 ## Releases
 
-Versioning is semver: breaking changes only at a major version. The notes on
+Versioning is semver: a breaking change lands at a minor bump while the major
+version is 0, and at a major bump from 1.0. The notes on
 each [release](https://github.com/jamesfxley/pico-time/releases) record what
 changed and, for a break, what to change in your own code (`EN-06.3`).
 
