@@ -7,6 +7,8 @@
 
 #include <array>
 #include <atomic>
+#include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -14,6 +16,8 @@
 #include <pico_family/device_test.hpp>
 #include <pico_time/core/epoch.hpp>
 #include <pico_time/time_sync/time_sync.hpp>
+#include <string_view>
+#include <system_error>
 
 namespace {
 
@@ -96,6 +100,127 @@ struct OffsetRange {
     return {.lower = epoch_us - after,
             .upper = epoch_us - before,
             .ok = applied && pico_time::is_time_synchronized()};
+}
+
+class FailureDetail {
+   public:
+    void append(std::string_view text) {
+        if (text.size() > buffer_.size() - used_) {
+            complete_ = false;
+            return;
+        }
+        for (const char character : text) {
+            buffer_[used_] = character;
+            ++used_;
+        }
+    }
+
+    void append_number(int number) {
+        std::array<char, 32> digits{};
+        const auto converted =
+            std::to_chars(digits.begin(), digits.end(), number);
+        if (converted.ec != std::errc{}) {
+            complete_ = false;
+            return;
+        }
+        append({digits.data(),
+                static_cast<std::size_t>(converted.ptr - digits.data())});
+    }
+
+    [[nodiscard]] std::string_view text() const {
+        return complete_ ? std::string_view{buffer_.data(), used_}
+                         : "failure detail exceeded fixed capacity";
+    }
+
+   private:
+    std::array<char, 256> buffer_{};
+    std::size_t used_ = 0;
+    bool complete_ = true;
+};
+
+struct RefusalResult {
+    bool passed = true;
+    FailureDetail detail;
+};
+
+// AR-4: record the first unexpected outcome on the promised POSIX surface.
+void inspect_posix_set(RefusalResult& result, const timeval& value,
+                       const char* phase, const char* input, bool valid) {
+    const bool synchronized = pico_time::is_time_synchronized();
+    const auto before = read_clock();
+    errno = 0;
+    const auto call_before = uptime_us();
+    const int status = settimeofday(&value, nullptr);
+    const int error = errno;
+    const auto call_after = uptime_us();
+    const auto after = read_clock();
+    const OffsetRange original{.lower = before.value - before.after,
+                               .upper = before.value - before.before,
+                               .ok = before.ok};
+    const bool moved = !matches_offset(after, original);
+    const bool state = pico_time::is_time_synchronized();
+    const auto epoch_us =
+        (static_cast<std::int64_t>(value.tv_sec) * MICROSECONDS_PER_SECOND) +
+        value.tv_usec;
+    const bool applied = matches_offset(after, {.lower = epoch_us - call_after,
+                                                .upper = epoch_us - call_before,
+                                                .ok = status == 0});
+    const bool passed = valid ? status == 0 && state && applied
+                              : status == -1 && error == EINVAL && !moved &&
+                                    state == synchronized;
+    if (!passed && result.passed) {
+        result.detail.append("first-failure phase=");
+        result.detail.append(phase);
+        result.detail.append(" input=");
+        result.detail.append(input);
+        result.detail.append(" return=");
+        result.detail.append_number(status);
+        result.detail.append(" errno=");
+        result.detail.append_number(error);
+        result.detail.append(" pico-clock-moved=");
+        if (before.ok && after.ok) {
+            result.detail.append(moved ? "yes" : "no");
+        } else {
+            result.detail.append("unreadable");
+        }
+        result.detail.append(" sync-state-changed=");
+        result.detail.append(state != synchronized ? "yes" : "no");
+        result.detail.append(" input-offset-applied=");
+        result.detail.append(applied ? "yes" : "no");
+    }
+    result.passed = passed && result.passed;
+}
+
+// AR-4: all invalid inputs run before and after one valid POSIX set.
+[[nodiscard]] RefusalResult refuses_invalid_inputs() {
+    struct Input {
+        const char* name = nullptr;
+        timeval value{};
+    };
+
+    const auto floor = static_cast<time_t>(pico_time::MIN_EPOCH_SECONDS);
+    const auto ceiling = static_cast<time_t>(pico_time::MAX_EPOCH_SECONDS);
+    const std::array inputs{
+        Input{.name = "negative-seconds",
+              .value = {.tv_sec = -1, .tv_usec = 0}},
+        Input{.name = "negative-microseconds",
+              .value = {.tv_sec = floor, .tv_usec = -1}},
+        Input{.name = "million-microseconds",
+              .value = {.tv_sec = floor, .tv_usec = MICROSECONDS_PER_SECOND}},
+        Input{.name = "below-window",
+              .value = {.tv_sec = floor - 1, .tv_usec = 0}},
+        Input{.name = "at-ceiling",
+              .value = {.tv_sec = ceiling, .tv_usec = 0}}};
+    RefusalResult result;
+    for (const auto& input : inputs) {
+        inspect_posix_set(result, input.value, "before", input.name, false);
+    }
+    const timeval valid{.tv_sec = floor, .tv_usec = SET_FRACTION_US};
+    inspect_posix_set(result, valid, "valid", "local-set", true);
+    for (const auto& input : inputs) {
+        inspect_posix_set(result, input.value, "after", input.name, false);
+    }
+    return result;
 }
 
 // FR-7: no writer runs between these reads; yields exercise the newlib shim.
@@ -190,6 +315,12 @@ int main() {
     pico_family::device_test::Run run;
     run.check("FR-2", "newlib-clocks-start-at-uptime", clocks_start_at_uptime(),
               "boot brackets and unsynchronized state");
+    const auto refusal = refuses_invalid_inputs();
+    run.check("AR-4", "settimeofday-refuses-invalid-inputs", refusal.passed,
+              refusal.detail.text());
+    // A functioning POSIX set writes once; preserve FR-6's writer interval
+    // before the independent FR-7/FR-6 baseline is applied.
+    sleep_ms(WRITER_INTERVAL_MS);
     const auto initial = set_clock(pico_time::MIN_EPOCH_SECONDS);
     run.check("FR-7", "newlib-clock-advances-without-resetting-offset",
               clock_advances(initial),
