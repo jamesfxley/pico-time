@@ -94,7 +94,8 @@ a module's headers live with it, and only what is in a `FILE_SET` is installed.
 - `tests/firmware/` is the cross tree's: `docs/` compiles the README's and the
   usage guide's examples from the documents (`EN-03.5`), and
   the `lwipopts-required` consumer case is AR-5's configure check.
-- `examples/ntp_sync/` — flashable image for the device-only traceability rows.
+- `tests/device/` — board-only clock tests, with no network access.
+- `examples/ntp_sync/` — flashable image for network validation.
 
 Ships as `pico_time::time_sync` (firmware), and `pico_time::core`,
 `pico_time::ntp` and `pico_time::testing` (portable).
@@ -113,8 +114,9 @@ in [pinned family guides](../infra/agents/AGENTS.md).
   `src/core/`, and every decision about an attempt — how many, which datagrams
   to trust, when an abandoned lookup's slot may be reused — lives in
   `src/ntp/`, above the `INtpTransport` seam. Both are host-tested.
-  What is left needs the SDK, and the traceability matrix establishes it by
-  *Review* rather than by a host test. An empty `tests/time_sync/` would assert
+  What is left needs the SDK; `tests/device/` exercises the newlib clocks
+  and interrupt reads. Structural properties remain
+  review-only in the traceability matrix. An empty `tests/time_sync/` would assert
   coverage that does not exist.
 
 - **The slot pool is above the seam on purpose.** It exists because
@@ -162,11 +164,12 @@ in [pinned family guides](../infra/agents/AGENTS.md).
   holder. Callbacks record an outcome; `synchronize_ntp()` does the logging.
 - The newlib shims are the point of the library: nothing downstream should need
   to know how the clock works. Changes that require callers to opt in defeat it.
-- **The portable core is host-tested; the glue is not.** `ntp_message` and
+- **The portable core is host-tested; the glue needs a board.** `ntp_message` and
   `wall_clock` carry the whole validation surface and the publication protocol,
   so they are testable and fuzzable on a host. Claims about the lwIP client,
   the SDK counter or the newlib link still need a device run
-  (`examples/ntp_sync/`), and the specification marks which rows those are.
+  (`tests/device/` for the clock, `examples/ntp_sync/` for the network),
+  and the specification marks which rows those are.
 - **`-Werror` is enforced per source, not per target.** The SDK compiles its own
   sources into whichever target links its INTERFACE libraries, so a
   target-scoped `-Werror` would land on SDK and lwIP code this repo cannot fix.

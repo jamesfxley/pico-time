@@ -93,8 +93,11 @@ retain build and lint evidence. The fuzz tree runs a bounded seed-corpus test.
 The installed firmware consumer links the relocated package after initializing
 its own SDK; host installation is refused.
 
-`examples/ntp_sync/` is a flashable image for the on-device validation that the
-host suite cannot reach (`FR-2`, `FR-7`, `NR-3`, `NR-4`).
+`tests/device/` builds a board-only test image for the newlib clocks and
+interrupt reads (`FR-2`, `FR-6`, `FR-7`). It uses no
+network. `examples/ntp_sync/` provides network validation (`NR-3`, `NR-4`).
+Device runs require separate authorization; see the
+[pinned device guide](infra/guides/device.md#device-tests).
 
 ## API
 

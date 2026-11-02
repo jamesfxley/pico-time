@@ -105,6 +105,10 @@ if(PICO_TIME_ENABLE_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+if(PROJECT_IS_TOP_LEVEL AND PICO_TIME_BUILD_FIRMWARE)
+    add_subdirectory(tests/device)
+endif()
+
 if(PICO_TIME_ENABLE_INSTALL)
     if(NOT PICO_TIME_BUILD_FIRMWARE)
         message(FATAL_ERROR
