@@ -16,6 +16,7 @@
 #include <pico_family/device_test.hpp>
 #include <pico_time/core/epoch.hpp>
 #include <pico_time/time_sync/time_sync.hpp>
+#include <span>
 #include <string_view>
 #include <system_error>
 
@@ -25,9 +26,16 @@ constexpr std::int64_t MICROSECONDS_PER_SECOND = 1'000'000;
 constexpr std::uint32_t WRITER_INTERVAL_MS = 1000;
 constexpr std::uint32_t YIELD_MS = 1;
 constexpr std::size_t ADVANCE_READS = 8;
-constexpr std::int64_t IRQ_INTERVAL_US = 1;
+constexpr std::int64_t IRQ_INTERVAL_US = 10;
+constexpr std::uint64_t IRQ_WINDOW_US = 2000;
 constexpr std::uint32_t IRQ_DRAIN_US = 100;
+// pico/time.h:768: positive delays begin after callback completion. Within
+// a bounded window there can be at most window/interval + 1 samples,
+// independent of callback execution time. Capture is reset for each store.
 constexpr std::size_t IRQ_CAPACITY = 256;
+static_assert(IRQ_CAPACITY >=
+              (IRQ_WINDOW_US / static_cast<std::uint64_t>(IRQ_INTERVAL_US)) +
+                  1);
 constexpr std::size_t OFFSET_COUNT = 3;
 constexpr std::uint64_t EPOCH_STEP_SECONDS = 86400;
 constexpr std::int64_t SET_FRACTION_US = 123456;
@@ -254,6 +262,9 @@ struct InterruptReads {
     std::atomic<bool> overflow{false};
     std::atomic<bool> in_progress{false};
     std::atomic<bool> interrupted{false};
+    std::atomic<bool> expired{false};
+    // Immutable between timer registration and cancellation on this core.
+    std::uint64_t started_us = 0;
 };
 
 static_assert(std::atomic<std::size_t>::is_always_lock_free);
@@ -265,19 +276,32 @@ static_assert(std::atomic<bool>::is_always_lock_free);
 // before mainline inspects them. No output or allocation runs in the IRQ.
 bool read_in_interrupt(repeating_timer_t* timer) {
     auto& reads = *static_cast<InterruptReads*>(timer->user_data);
-    if (reads.in_progress.load(std::memory_order_acquire)) {
-        // Independent coverage flag; sample data is published through count.
-        reads.interrupted.store(true, std::memory_order_relaxed);
-    }
     // This count has one writer and is not used to acquire sample contents.
     const auto index = reads.count.load(std::memory_order_relaxed);
     if (index == reads.samples.size()) {
         // Independent failure flag; it publishes no other data.
         reads.overflow.store(true, std::memory_order_relaxed);
+        // pico/time.h:739: false stops the timer, rather than pausing capture.
         return false;
     }
+    if (time_us_64() - reads.started_us >= IRQ_WINDOW_US) {
+        // Independent hang guard, including IRQ starvation of mainline.
+        reads.expired.store(true, std::memory_order_relaxed);
+        return false;
+    }
+    const bool in_progress = reads.in_progress.load(std::memory_order_acquire);
     reads.samples[index] = read_clock();
     reads.count.store(index + 1, std::memory_order_release);
+    if (in_progress) {
+        // Independent coverage flag; sample data is published through count.
+        reads.interrupted.store(true, std::memory_order_relaxed);
+    }
+    if (index + 1 == reads.samples.size()) {
+        // Saturation itself is a fixture failure, even if mainline would
+        // cancel before another callback attempts to append a sample.
+        reads.overflow.store(true, std::memory_order_relaxed);
+        return false;
+    }
     return true;
 }
 
@@ -290,41 +314,61 @@ struct IrqResult {
     std::string_view detail;
 };
 
-[[nodiscard]] IrqResult irq_reads_survive(OffsetRange initial) {
-    static InterruptReads reads;
-    std::array<OffsetRange, OFFSET_COUNT> offsets{initial};
-    for (std::size_t index = 1; index < offsets.size(); ++index) {
-        sleep_ms(WRITER_INTERVAL_MS);
-        // No callback is active here. This flag carries no sample data.
-        reads.interrupted.store(false, std::memory_order_relaxed);
-        repeating_timer_t timer{};
-        // pico/time.h:801-818: a positive microsecond delay schedules from
-        // callback completion, leaving mainline time between IRQ callbacks.
-        if (!add_repeating_timer_us(IRQ_INTERVAL_US, read_in_interrupt, &reads,
-                                    &timer)) {
-            return {.detail = "could not start store interrupt"};
-        }
-        sleep_us(IRQ_DRAIN_US);
-        offsets[index] = set_clock(
-            pico_time::MIN_EPOCH_SECONDS + (index * EPOCH_STEP_SECONDS),
-            &reads.in_progress);
-        sleep_us(IRQ_DRAIN_US);
-        if (!cancel_repeating_timer(&timer)) {
-            return {.detail = "store interrupt timer did not remain active"};
-        }
-        // Cancellation on the callback's core ends all writes. This flag
-        // carries no sample data; count's release/acquire publishes those.
-        if (!reads.interrupted.load(std::memory_order_relaxed)) {
-            return {.detail = "a store was not interrupted"};
-        }
+struct IrqStoreResult {
+    OffsetRange offset{};
+    std::string_view failure;
+};
+
+[[nodiscard]] IrqStoreResult capture_irq_store(InterruptReads& reads,
+                                               std::uint64_t seconds) {
+    // Previous capture is validated before reuse. No callback is active;
+    // these resets publish no data to another execution context.
+    reads.count.store(0, std::memory_order_relaxed);
+    reads.overflow.store(false, std::memory_order_relaxed);
+    reads.expired.store(false, std::memory_order_relaxed);
+    reads.interrupted.store(false, std::memory_order_relaxed);
+    repeating_timer_t timer{};
+    reads.started_us = time_us_64();
+    // pico/time.h:768,810: positive delays schedule after completion, without
+    // negative-delay catch-up. A deadline bounds the capture even if mainline
+    // cannot resume promptly. Neither the gap nor the deadline proves overlap.
+    if (!add_repeating_timer_us(IRQ_INTERVAL_US, read_in_interrupt, &reads,
+                                &timer)) {
+        return {.failure = "could not start store interrupt"};
     }
+    sleep_us(IRQ_DRAIN_US);
+    const auto offset = set_clock(seconds, &reads.in_progress);
+    sleep_us(IRQ_DRAIN_US);
+    const bool cancelled = cancel_repeating_timer(&timer);
+    // pico/time.h:846: false means absent. Diagnose our callback's stop
+    // reasons first. Cancellation on this core ends all callback access;
+    // these independent flags carry no sample data (count publishes those).
+    if (reads.overflow.load(std::memory_order_relaxed)) {
+        return {.failure = "IRQ sample buffer full; callback stopped timer"};
+    }
+    if (reads.expired.load(std::memory_order_relaxed)) {
+        return {.failure =
+                    "store interrupt deadline expired; callback stopped timer"};
+    }
+    if (!cancelled) {
+        return {.failure = "store interrupt timer stopped unexpectedly"};
+    }
+    if (!reads.interrupted.load(std::memory_order_relaxed)) {
+        return {.failure = "a store was not interrupted"};
+    }
+    return {.offset = offset, .failure = {}};
+}
+
+[[nodiscard]] bool validate_irq_capture(
+    const InterruptReads& reads, std::span<const OffsetRange> offsets,
+    std::array<bool, OFFSET_COUNT>& observed) {
     const auto count = reads.count.load(std::memory_order_acquire);
-    // Independent failure flag; no data is acquired through it.
-    bool passed = !reads.overflow.load(std::memory_order_relaxed) &&
-                  count > 0 && count <= reads.samples.size();
-    std::array<bool, OFFSET_COUNT> observed{};
-    for (std::size_t index = 0; index < count && index < reads.samples.size();
-         ++index) {
+    if (count == 0 || count > reads.samples.size() ||
+        offsets.size() > observed.size()) {
+        return false;
+    }
+    bool passed = true;
+    for (std::size_t index = 0; index < count; ++index) {
         bool whole = false;
         for (std::size_t offset = 0; offset < offsets.size(); ++offset) {
             const bool matches =
@@ -334,12 +378,35 @@ struct IrqResult {
         }
         passed = whole && passed;
     }
-    for (const bool seen : observed) {
-        passed = seen && passed;
+    return passed;
+}
+
+[[nodiscard]] IrqResult irq_reads_survive(OffsetRange initial) {
+    static InterruptReads reads;
+    std::array<OffsetRange, OFFSET_COUNT> offsets{initial};
+    std::array<bool, OFFSET_COUNT> observed{};
+    for (std::size_t index = 1; index < offsets.size(); ++index) {
+        sleep_ms(WRITER_INTERVAL_MS);
+        const auto capture = capture_irq_store(
+            reads, pico_time::MIN_EPOCH_SECONDS + (index * EPOCH_STEP_SECONDS));
+        if (!capture.failure.empty()) {
+            return {.detail = capture.failure};
+        }
+        offsets[index] = capture.offset;
+        // Only offsets published by this point are permitted. Validate every
+        // captured sample before resetting the buffer for the next store.
+        if (!validate_irq_capture(reads, std::span{offsets}.first(index + 1),
+                                  observed)) {
+            return {.detail = "IRQ read was not a whole stored offset"};
+        }
     }
-    return {.passed = passed,
-            .detail = passed ? "each store interrupted; whole offsets observed"
-                             : "IRQ reads did not match every stored offset"};
+    for (const bool seen : observed) {
+        if (!seen) {
+            return {.detail = "IRQ did not observe every stored offset"};
+        }
+    }
+    return {.passed = true,
+            .detail = "each store interrupted; whole offsets observed"};
 }
 
 }  // namespace
