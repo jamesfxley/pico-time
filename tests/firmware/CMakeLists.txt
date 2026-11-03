@@ -14,3 +14,13 @@ house_cxx_add_doc_examples(pico_time_firmware_doc_examples PACKAGE pico_time
     LIBRARIES pico_time::ntp pico_logging::core)
 target_include_directories(pico_time_firmware_doc_examples PRIVATE
     ${PROJECT_SOURCE_DIR}/src/time_sync/include)
+
+# AR-4: retain a POSIX setter call in a linked image so its map and symbols
+# expose whether the library or the SDK supplies settimeofday().
+add_executable(pico_time_settimeofday_probe settimeofday_probe.cpp)
+house_cxx_werror_sources(settimeofday_probe.cpp)
+# newlib exposes the BSD/POSIX setter declaration under __BSD_VISIBLE.
+target_compile_definitions(pico_time_settimeofday_probe PRIVATE _DEFAULT_SOURCE)
+target_link_libraries(pico_time_settimeofday_probe PRIVATE
+    pico_time_strict pico_time::time_sync ${PICO_LWIPOPTS_TARGET})
+pico_add_extra_outputs(pico_time_settimeofday_probe)

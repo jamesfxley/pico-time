@@ -95,8 +95,10 @@ clears when those lookups call back — `retryable()` reports it as such.
 
 ## Reaching the standard clocks
 
-`time_keeper.cpp` defines `_gettimeofday` and `_settimeofday`, which override
-newlib's weak stubs at link time. That is the whole wiring:
+`time_keeper.cpp` defines `_gettimeofday` and `settimeofday`, which override
+the Pico SDK's weak definitions at link time. `settimeofday` delegates to
+`_settimeofday`, the shared validation path into `apply_wall_clock_time()`.
+The timezone argument is ignored. That is the whole wiring:
 `std::chrono::system_clock`, `time()` and `gettimeofday()` pick the
 synchronized clock up with nothing further to call. Before the first
 synchronization they report time since boot. A read of the offset that cannot

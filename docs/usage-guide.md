@@ -127,12 +127,25 @@ It fails and leaves the clock untouched rather than applying a value it cannot
 vouch for, and says which bound was broken. The same window applies, for the
 same reasons.
 
+`settimeofday()` is the standard C entry point declared by `<sys/time.h>`;
+newlib exposes its declaration with `_DEFAULT_SOURCE` enabled before system
+headers (for example, as an application compile definition). The library's
+strong definition overrides the SDK setter and delegates to `_settimeofday()`.
+Both reject a null time pointer, invalid fields or an out-of-window epoch with
+−1 and `errno` set to `EINVAL`, leaving the clock untouched (AR-4). A valid call
+returns 0 and updates the clock that the standard clock reads report. The
+timezone pointer is ignored.
+
+pico-time defines `settimeofday()`, `_settimeofday()` and `_gettimeofday()` as
+its clock hooks for the image. A consumer must not define any of these
+functions; duplicate definitions fail the link.
+
 Call it from mainline context, from one caller, and at most once per second.
 `synchronize_ntp()` satisfies that on its own — it stores at most once per
 boot, since once synchronized it returns before any work (NR-4) — but this
-entry point and the `settimeofday()` shim over it do not, and nothing enforces
-it. The publication ring above is sized against those terms. A single writer
-storing in a tight loop that laps the ring inside every attempt of a concurrent
+entry point and the `settimeofday()` and `_settimeofday()` shims over it do
+not, and nothing enforces it. The publication ring above is sized against those
+terms. A single writer storing in a tight loop that laps the ring inside every attempt of a concurrent
 read makes that read fail rather than return a torn value -- `gettimeofday()`
 returns -1 with `errno` set to `EAGAIN`, and `time()` returns `(time_t)-1`.
 Two writers at once, on two cores or one in an interrupt, are not detected: a

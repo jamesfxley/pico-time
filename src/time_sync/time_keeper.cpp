@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 // The newlib syscall shims that expose the wall clock.
 //
-// Defining _gettimeofday/_settimeofday here overrides newlib's weak stubs at
-// link time, so std::chrono::system_clock, time(), and gettimeofday() pick the
-// synchronized clock up with no further wiring.
+// _gettimeofday and settimeofday override the Pico SDK's weak definitions, so
+// std::chrono::system_clock, time(), and gettimeofday() read the same clock
+// that settimeofday() writes. _settimeofday shares the validated setter.
 //
 // The clock itself -- the offset, its publication protocol and the arithmetic
 // -- lives in wall_clock.hpp, which has no SDK dependency and is host-tested.
@@ -76,10 +76,10 @@ extern "C" int _gettimeofday(struct timeval* tv, void* tz) {
     return 0;
 }
 
-// A newlib syscall name: the leading underscore is mandated by the ABI, not a
-// style choice. struct timeval comes from <sys/time.h>, the POSIX-mandated
-// header; include-cleaner names newlib's sys/_timeval.h, an implementation
-// header no portable source should include.
+// Preserve the existing C entry point, including its leading underscore.
+// struct timeval comes from <sys/time.h>, the POSIX-mandated header;
+// include-cleaner names newlib's sys/_timeval.h, an implementation header no
+// portable source should include.
 // NOLINTNEXTLINE(readability-identifier-naming,misc-include-cleaner)
 extern "C" int _settimeofday(const struct timeval* tv,
                              const struct timezone* tz) {
@@ -109,6 +109,16 @@ extern "C" int _settimeofday(const struct timeval* tv,
         return -1;
     }
     return 0;
+}
+
+// Match newlib sys/time.h:423: int settimeofday(const struct timeval *,
+//                                            const struct timezone *);
+// The SDK's weak settimeofday writes its private offset rather than calling
+// _settimeofday (pico_clib_interface/newlib_interface.c:91). Keep the syscall
+// entry point above for direct callers; both names use its AR-4 validation.
+extern "C" int settimeofday(const struct timeval* tv,
+                            const struct timezone* tz) {
+    return _settimeofday(tv, tz);
 }
 
 namespace pico_time {
