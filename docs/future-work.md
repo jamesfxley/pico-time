@@ -61,15 +61,14 @@ Not breaking under `EN-06.1`: it adds evidence and changes no interface.
 
 pico-time.
 
-## FW-3 — FR-2, FR-7 and NR-4 device run on this release
+## FW-3 — NR-4 device run on this release
 
 ### What is absent
 
-No run record of `examples/ntp_sync/` on a board is committed for FR-2 (time
-counts from boot before the first synchronization), FR-7 (successive reads
-increase across an idle period) or NR-4's functional criterion (a second call
-succeeds immediately). The specification names a device run as the
-establishing evidence for all three. FW-2 covers NR-4's direct duration and
+No run record of `examples/ntp_sync/` on a board is committed for NR-4's
+functional criterion (a second call succeeds immediately). The specification
+names a device run as its establishing evidence. FR-2 and FR-7 are established
+by the device tests in `tests/device/`. FW-2 covers NR-4's direct duration and
 packet capture.
 
 ### Why it is not built
@@ -80,9 +79,8 @@ release.
 
 ### What would have to be true to build it
 
-A device run of `pico_time_ntp_sync` that records the pre-synchronization and
-post-synchronization epochs, the epoch after the idle wait and the outcome of
-the second synchronization, committed as a run record.
+A device run of `pico_time_ntp_sync` that records the outcome of the second
+synchronization, committed as a run record.
 
 ### Version cost
 

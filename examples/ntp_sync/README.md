@@ -81,9 +81,8 @@ from the host rather than by hand at the board.
 No run record of `pico_time_ntp_sync` on this release is committed. Two items
 are pending:
 
-- FR-2, FR-7 and NR-4's functional criterion need a device run that records
-  the pre-sync and post-sync epochs, the epoch after the wait and the second
-  call's outcome (FW-3).
+- NR-4's functional criterion needs a device run that records the second
+  call's outcome (FW-3). FR-2 and FR-7 are established by `tests/device/`.
 - NR-4's direct timing and a packet capture over the same interval are
   separate (FW-2).
 
