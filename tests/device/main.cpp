@@ -19,6 +19,8 @@
 #include <string_view>
 #include <system_error>
 
+#include "loopback.hpp"
+
 namespace {
 
 constexpr std::int64_t MICROSECONDS_PER_SECOND = 1'000'000;
@@ -369,6 +371,11 @@ int main() {
     pico_family::device_test::Run run;
     run.check("FR-2", "newlib-clocks-start-at-uptime", clocks_start_at_uptime(),
               "boot brackets and unsynchronized state");
+    const auto loopback = check_loopback_replies();
+    run.check("VR-7", "lwip-rejects-unrelated-reply-before-valid-reply",
+              loopback.passed, loopback.detail);
+    // VR-7 can publish once; preserve the public writer interval before AR-4.
+    sleep_ms(WRITER_INTERVAL_MS);
     const auto refusal = refuses_invalid_inputs();
     run.check("AR-4", "settimeofday-refuses-invalid-inputs", refusal.passed,
               refusal.detail.text());

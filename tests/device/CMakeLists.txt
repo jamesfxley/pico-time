@@ -1,6 +1,6 @@
 pico_family_add_device_test(pico_time_device_tests
     PACKAGE pico_time
-    SOURCES main.cpp
+    SOURCES main.cpp loopback.cpp
     LIBRARIES pico_time::time_sync ${PICO_LWIPOPTS_TARGET})
 
 # newlib sys/features.h:107 enables BSD declarations with _DEFAULT_SOURCE;

@@ -293,7 +293,7 @@ none of them is ours to change.
 | VR-4 | `ntp_message_test.cpp` `NtpMessage.RejectsAReplyToADifferentRequest`, `.RejectsAReplayedCapture`, `.RequestAndResponseAgreeOnWhereTheNonceLives`, `.AnUnauthenticatedDatagramIsOnlyEverAnOriginateMismatch` | A mismatched nonce is refused; a reply valid under one nonce is refused under another; a built request round-trips; a mismatched nonce outranks every other defect in the message |
 | VR-5 | `ntp_message_test.cpp` `NtpMessage.RejectsAnUnsetTransmitTimestamp`, `.RejectsAnUnsetTimestampEvenWithANonZeroFraction` | A zero seconds field is refused whatever the fraction |
 | VR-6 | `ntp_message_test.cpp` `NtpMessage.RejectsATimestampBelowThePlausibilityFloor`, `.AcceptsATimestampExactlyAtThePlausibilityFloor`, `.AcceptsTheSecondBelowThePlausibilityCeiling`, `.RejectsATimestampAtAndAboveThePlausibilityCeiling` | Both edges classify correctly, and both are reachable from the wire |
-| VR-7 | `ntp_message_test.cpp` `NtpMessage.AnUnauthenticatedDatagramIsOnlyEverAnOriginateMismatch`; `ntp_synchronizer_test.cpp` `ADatagramFromElsewhereDoesNotEndTheAttempt`, `ADatagramTooShortForAMessageDoesNotEndTheAttempt`, `AReplyToAnotherRequestIsDroppedNotCounted` | No unauthenticated datagram reaches a verdict other than `ORIGINATE_MISMATCH`, and both that path and the address and length checks return without publishing an outcome. The port check is in the lwIP receive callback and is review-only |
+| VR-7 | `ntp_message_test.cpp` `NtpMessage.AnUnauthenticatedDatagramIsOnlyEverAnOriginateMismatch`; `ntp_synchronizer_test.cpp` `ADatagramFromElsewhereDoesNotEndTheAttempt`, `ADatagramTooShortForAMessageDoesNotEndTheAttempt`, `AReplyToAnotherRequestIsDroppedNotCounted`; `tests/device/main.cpp` `lwip-rejects-unrelated-reply-before-valid-reply` | Host checks establish that unauthenticated replies reach only `ORIGINATE_MISMATCH`. The device case delivers wrong-port, short, wrong-originate and wrong-address UDP replies successively to one public synchronization attempt. A shim on the request's real UDP PCB records exactly one callback per datagram with the expected source address, port and length, then forwards the original arguments to the saved adapter callback unchanged. After each bad datagram is polled, the original endpoint stays open and the clock stays unsynchronized. One valid nonce-matching reply passes through the same shim and synchronizes, with exactly one request and a clock value within the public call bracket; the original callback is restored. The device case exercises the port check through the real lwIP adapter. Source address 127.0.0.2 is supplied by `udp_sendto_if_src` over loopback. This covers the lwIP glue, not the CYW43 Wi-Fi path |
 | VR-8 | Review of the lwIP callbacks — `lwip_ntp_transport.cpp` `on_dns_resolved` and the `udp_recv` lambda, `ntp_synchronizer.cpp` `Slot::on_resolved` and `Slot::on_datagram`; the C-heap `nm` gate | No callback contains a `PICO_LOG_*`, a lock acquisition, a send, or an allocation other than the required `pbuf_free`; no object of this library references the C heap. `ntp_client.cpp` is composition, not a callback, and logs deliberately |
 | AR-1 | ctest `pico_time_refuses_discarded_synchronized`; the compiler, through pico-util's `[[nodiscard]]` `Result` | Discarding `is_time_synchronized()` fails to compile with `nodiscard`, while the same call used compiles; every other entry point returns a `Result`, whose discard pico-util refuses, and warnings are errors |
 | AR-2 | `ntp_synchronizer_test.cpp` `RefusesANonPositiveTimeoutWithoutTouchingTheNetwork`; review of `ntp_client.cpp` `synchronize_ntp` for the ceiling and the order | A zero and a negative timeout are each refused with `INVALID_TIMEOUT` before any network call. The `MAX_SYNC_TIMEOUT` ceiling is review-only: it bounds how long a caller may surrender its core, which is a policy of the public entry point rather than of the transport-agnostic synchronizer |
@@ -303,9 +303,24 @@ none of them is ours to change.
 | AR-6 | `ntp_synchronizer_test.cpp` — `ALookupThatNeverLandsHoldsItsSlot`, `SlotExhaustionIsReportedAndIsRetryable`, `AnAbandonedLookupReleasesItsSlotWhenItLands`, `AResolutionLandingUnderTheLockIsSerialized` | Three attempts abandoned in resolution hold all three slots; the next call fails with `NO_ATTEMPT_SLOT`, opens no endpoint, and reports the failure as retryable; once each abandoned lookup lands its slot is released and a later call synchronizes normally, and a lookup landing under the lock is serialized behind it. That a slot is released exactly once is review-only, of the `resolve_pending` and `abandoned` handshake under the lock. Established here rather than by a device run: a lookup landing after the attempt that started it was torn down is a race the bench cannot induce on demand |
 | AR-7 | `pico-w-refused` and `pico2-refused` consumer cases, a consumer adding the library | On `pico_w` the configure fails saying `PICO_TIME needs PICO_PLATFORM rp2350`; on `pico2`, saying `PICO_TIME needs a board with the CYW43 radio` |
 
-Device cases in `tests/device/` exercise the clock and newlib glue without
-network access. Network validation uses `examples/ntp_sync/`. Both require
-hardware; a firmware build does not establish a device pass (`EN-06.6`).
+Device cases in `tests/device/` exercise the clock, newlib glue and the lwIP
+adapter. FR-2 runs before synchronization, followed by VR-7's loopback exchange,
+then AR-4, FR-7 and FR-6. AR-4 preserves the synchronization state and offset on
+each refusal before and after its valid POSIX set, including an already
+synchronized entry. The image finishes within 20 seconds of console attachment
+and reports no measurements. Build the board image with:
+
+```sh
+HOUSE_MATRIX_LWIPOPTS=pico_time_device_lwipopts python3 dev.py build --tree firmware
+```
+
+This options target configures the archive and image together, adding loopback,
+a local host-list mapping of `pool.ntp.org` to 127.0.0.1 and responder resources
+to the unchanged fallback configuration. The fallback image reports VR-7 FAIL
+with the missing option; it cannot establish loopback evidence. Loopback needs
+no Wi-Fi join and does not cover the Wi-Fi path. Wi-Fi validation uses
+`examples/ntp_sync/`. Both tiers require hardware; a firmware build does not
+establish a device pass (`EN-06.6`).
 Device evidence is recorded in the pull request (FW-3). Rows marked **Review** state a structural property of a
 firmware-only translation unit that no host test can reach; they are checked by
 the

@@ -94,7 +94,7 @@ a module's headers live with it, and only what is in a `FILE_SET` is installed.
 - `tests/firmware/` is the cross tree's: `docs/` compiles the README's and the
   usage guide's examples from the documents (`EN-03.5`), and
   the `lwipopts-required` consumer case is AR-5's configure check.
-- `tests/device/` — board-only clock tests, with no network access.
+- `tests/device/` — board-only clock tests and an lwIP loopback NTP fixture.
 - `examples/ntp_sync/` — flashable image for network validation.
 
 Ships as `pico_time::time_sync` (firmware), and `pico_time::core`,
@@ -114,8 +114,8 @@ in [pinned family guides](../infra/agents/AGENTS.md).
   `src/core/`, and every decision about an attempt — how many, which datagrams
   to trust, when an abandoned lookup's slot may be reused — lives in
   `src/ntp/`, above the `INtpTransport` seam. Both are host-tested.
-  What is left needs the SDK; `tests/device/` exercises the newlib clocks
-  and interrupt reads. Structural properties remain
+  What is left needs the SDK; `tests/device/` exercises the newlib clocks,
+  interrupt reads and the lwIP loopback exchange. Structural properties remain
   review-only in the traceability matrix. An empty `tests/time_sync/` would assert
   coverage that does not exist.
 
@@ -168,7 +168,7 @@ in [pinned family guides](../infra/agents/AGENTS.md).
   `wall_clock` carry the whole validation surface and the publication protocol,
   so they are testable and fuzzable on a host. Claims about the lwIP client,
   the SDK counter or the newlib link still need a device run
-  (`tests/device/` for the clock, `examples/ntp_sync/` for the network),
+  (`tests/device/` for the clock and loopback, `examples/ntp_sync/` for Wi-Fi),
   and the specification marks which rows those are.
 - **`-Werror` is enforced per source, not per target.** The SDK compiles its own
   sources into whichever target links its INTERFACE libraries, so a
