@@ -2,6 +2,7 @@
 #include <hardware/timer.h>
 #include <pico/stdio.h>
 #include <pico/time.h>
+#include <pico/types.h>
 #include <sys/_timeval.h>
 #include <sys/time.h>
 
@@ -25,10 +26,10 @@ constexpr std::int64_t MICROSECONDS_PER_SECOND = 1'000'000;
 constexpr std::uint32_t WRITER_INTERVAL_MS = 1000;
 constexpr std::uint32_t YIELD_MS = 1;
 constexpr std::size_t ADVANCE_READS = 8;
-constexpr std::int64_t IRQ_INTERVAL_US = 1;
 constexpr std::uint64_t IRQ_WINDOW_US = 2000;
-constexpr std::uint32_t IRQ_DRAIN_US = 100;
-constexpr std::size_t OFFSET_COUNT = 3;
+constexpr std::uint64_t MIN_AIM_US = 4;
+constexpr std::size_t ALARM_WAIT_POLLS = 20000;
+constexpr std::size_t STORE_COUNT = 3;
 constexpr std::uint64_t EPOCH_STEP_SECONDS = 86400;
 constexpr std::int64_t SET_FRACTION_US = 123456;
 
@@ -87,28 +88,29 @@ struct OffsetRange {
            chrono_us >= before_chrono && chrono_us <= after_chrono;
 }
 
-[[nodiscard]] OffsetRange set_clock(std::uint64_t seconds,
-                                    std::atomic<bool>* in_progress = nullptr) {
-    const auto before = uptime_us();
-    // Release/acquire keeps the marker around the public setter, so an IRQ
-    // observing true establishes the coverage precondition for this call.
-    if (in_progress != nullptr) {
-        in_progress->store(true, std::memory_order_release);
-    }
-    const bool applied =
-        pico_time::apply_wall_clock_time(
-            seconds, static_cast<std::uint32_t>(SET_FRACTION_US))
-            .ok();
-    if (in_progress != nullptr) {
-        in_progress->store(false, std::memory_order_release);
-    }
-    const auto after = uptime_us();
+struct TimedStore {
+    OffsetRange offset{};
+    std::uint64_t duration_us = 0;
+};
+
+[[nodiscard]] TimedStore write_clock(std::uint64_t seconds) {
+    // T6 calibration: these SDK counter reads immediately bracket the public
+    // setter. Duration stays internal and is never a result or output value.
+    const auto before = time_us_64();
+    const auto applied = pico_time::apply_wall_clock_time(
+        seconds, static_cast<std::uint32_t>(SET_FRACTION_US));
+    const auto after = time_us_64();
     const auto epoch_us =
         (static_cast<std::int64_t>(seconds) * MICROSECONDS_PER_SECOND) +
         SET_FRACTION_US;
-    return {.lower = epoch_us - after,
-            .upper = epoch_us - before,
-            .ok = applied && pico_time::is_time_synchronized()};
+    return {.offset = {.lower = epoch_us - static_cast<std::int64_t>(after),
+                       .upper = epoch_us - static_cast<std::int64_t>(before),
+                       .ok = applied.ok() && pico_time::is_time_synchronized()},
+            .duration_us = after - before};
+}
+
+[[nodiscard]] OffsetRange set_clock(std::uint64_t seconds) {
+    return write_clock(seconds).offset;
 }
 
 class FailureDetail {
@@ -249,35 +251,25 @@ void inspect_posix_set(RefusalResult& result, const timeval& value,
 }
 
 struct InterruptReads {
-    // Immutable while the timer is registered. The new clock may advance
+    // Immutable while the alarm is registered. The new clock may advance
     // from new_epoch_us by no more than elapsed uptime since started_us.
     OffsetRange old_offset{};
     std::int64_t new_epoch_us = 0;
     std::uint64_t started_us = 0;
     std::atomic<bool> in_progress{false};
     std::atomic<bool> interrupted{false};
-    std::atomic<bool> old_seen{false};
-    std::atomic<bool> new_seen{false};
-    std::atomic<bool> expired{false};
+    std::atomic<bool> fired{false};
     std::atomic<bool> bad_read{false};
-    // Only the IRQ writes, once per store; bad_read release/acquire publishes
-    // the entire slot to mainline. Later bad reads cannot overwrite it.
     ClockRead first_bad{};
 };
 
 static_assert(std::atomic<bool>::is_always_lock_free);
 
-// pico/time.h:739,768: true keeps the timer repeating, and a positive delay
-// runs from callback completion. Every callback returns true. Read checking
-// and flags need no growing storage, output, allocation or mainline lock.
-bool read_in_interrupt(repeating_timer_t* timer) {
-    auto& reads = *static_cast<InterruptReads*>(timer->user_data);
-    if (time_us_64() - reads.started_us >= IRQ_WINDOW_US) {
-        // Independent deadline flag; after expiry keep the callback short
-        // so mainline can cancel the timer and report the failed guard.
-        reads.expired.store(true, std::memory_order_relaxed);
-        return true;
-    }
+// pico/time.h:382-390: returning zero does not reschedule the alarm. This
+// callback reads exactly once; fired release/acquire publishes all results.
+std::int64_t read_in_interrupt(alarm_id_t alarm, void* user_data) {
+    static_cast<void>(alarm);
+    auto& reads = *static_cast<InterruptReads*>(user_data);
     const bool in_progress = reads.in_progress.load(std::memory_order_acquire);
     const auto sample = read_clock();
     const bool old = matches_offset(sample, reads.old_offset);
@@ -285,23 +277,14 @@ bool read_in_interrupt(repeating_timer_t* timer) {
         sample.after - static_cast<std::int64_t>(reads.started_us);
     const bool fresh = sample.ok && sample.value >= reads.new_epoch_us &&
                        sample.value <= reads.new_epoch_us + elapsed;
-    // Independent coverage flags publish no sample data.
-    if (old) {
-        reads.old_seen.store(true, std::memory_order_relaxed);
-    }
-    if (fresh) {
-        reads.new_seen.store(true, std::memory_order_relaxed);
-    }
-    if (in_progress) {
-        reads.interrupted.store(true, std::memory_order_relaxed);
-    }
-    // The IRQ is the sole writer. A relaxed test checks its own prior store;
-    // the release below publishes the fixed first-offender slot to mainline.
-    if (!old && !fresh && !reads.bad_read.load(std::memory_order_relaxed)) {
+    // Independent coverage flag; fired publishes callback completion.
+    reads.interrupted.store(in_progress, std::memory_order_relaxed);
+    if (!old && !fresh) {
         reads.first_bad = sample;
         reads.bad_read.store(true, std::memory_order_release);
     }
-    return true;
+    reads.fired.store(true, std::memory_order_release);
+    return 0;
 }
 
 struct IrqResult {
@@ -328,74 +311,118 @@ struct IrqStoreResult {
     std::string_view failure;
 };
 
+[[nodiscard]] bool await_alarm(const InterruptReads& reads) {
+    // At most one IRQ can run: neither this bounded poll loop nor its SDK
+    // counter deadline relies on progress against a repeating interrupt.
+    for (std::size_t poll = 0; poll < ALARM_WAIT_POLLS; ++poll) {
+        if (reads.fired.load(std::memory_order_acquire)) {
+            return true;
+        }
+        if (time_us_64() - reads.started_us >= IRQ_WINDOW_US) {
+            break;
+        }
+    }
+    return reads.fired.load(std::memory_order_acquire);
+}
+
 [[nodiscard]] IrqStoreResult capture_irq_store(InterruptReads& reads,
                                                const OffsetRange& old_offset,
-                                               std::uint64_t seconds) {
-    // No callback is active while resetting flags and immutable expectations.
-    // These relaxed resets publish no data; registration starts IRQ access.
+                                               std::uint64_t seconds,
+                                               std::uint64_t calibrated_us) {
+    // No callback is active while resetting the independent flags and
+    // immutable expectations. Registration starts access on this core.
     reads.in_progress.store(false, std::memory_order_relaxed);
     reads.interrupted.store(false, std::memory_order_relaxed);
-    reads.old_seen.store(false, std::memory_order_relaxed);
-    reads.new_seen.store(false, std::memory_order_relaxed);
-    reads.expired.store(false, std::memory_order_relaxed);
+    reads.fired.store(false, std::memory_order_relaxed);
     reads.bad_read.store(false, std::memory_order_relaxed);
     reads.old_offset = old_offset;
     reads.new_epoch_us =
         (static_cast<std::int64_t>(seconds) * MICROSECONDS_PER_SECOND) +
         SET_FRACTION_US;
-    repeating_timer_t timer{};
     reads.started_us = time_us_64();
-    // pico/time.h:768: the shortest positive delay is from callback completion.
-    // The deadline is a hang guard, never evidence that a store was
-    // interrupted.
-    if (!add_repeating_timer_us(IRQ_INTERVAL_US, read_in_interrupt, &reads,
-                                &timer)) {
-        return {.failure = "could not start store interrupt"};
+    const auto target =
+        from_us_since_boot(reads.started_us + (calibrated_us / 2));
+    // pico/time.h:620-638: the default pool dispatches on its core. With
+    // fire_if_past=false a target already passed before/during setup returns
+    // zero, never a synchronous mainline callback. Arming latency may miss
+    // the intended half-duration point; only an observed marker earns PASS.
+    const auto alarm = add_alarm_at(target, read_in_interrupt, &reads, false);
+    if (alarm == 0) {
+        return {.failure = "alarm missed the store: target already passed"};
     }
-    sleep_us(IRQ_DRAIN_US);
-    const auto offset = set_clock(seconds, &reads.in_progress);
-    sleep_us(IRQ_DRAIN_US);
-    const bool cancelled = cancel_repeating_timer(&timer);
-    // On this core cancellation ends callback access. Acquire observes the
-    // complete first bad read; independent flags carry no other data.
+    if (alarm < 0) {
+        return {.failure = "could not arm store alarm"};
+    }
+    // Counter reads stay outside the marker: an IRQ after the setter returns
+    // must be reported as a miss, not coverage of instrumentation.
+    const auto before = time_us_64();
+    reads.in_progress.store(true, std::memory_order_release);
+    const auto applied = pico_time::apply_wall_clock_time(
+        seconds, static_cast<std::uint32_t>(SET_FRACTION_US));
+    reads.in_progress.store(false, std::memory_order_release);
+    const auto after = time_us_64();
+    const OffsetRange stored{
+        .lower = reads.new_epoch_us - static_cast<std::int64_t>(after),
+        .upper = reads.new_epoch_us - static_cast<std::int64_t>(before),
+        .ok = applied.ok() && pico_time::is_time_synchronized()};
+    const bool fired = await_alarm(reads);
+    // pico/time.h:689-696: cancel pending delivery on timeout; false is normal
+    // after a one-shot has fired, so it cannot stand in for the fired flag.
+    const bool cancelled = cancel_alarm(alarm);
+    if (!fired) {
+        return {.failure = cancelled
+                               ? "alarm never fired before deadline"
+                               : "alarm never fired: timer no longer active"};
+    }
     if (reads.bad_read.load(std::memory_order_acquire)) {
-        return {.failure = "IRQ read was not a whole permitted value"};
+        return {.failure = "alarm read was not a whole permitted value"};
     }
-    if (reads.expired.load(std::memory_order_relaxed) ||
-        time_us_64() - reads.started_us >= IRQ_WINDOW_US) {
-        return {.failure = "store interrupt deadline expired"};
-    }
-    // pico/time.h:846: false means the timer did not exist.
-    if (!cancelled) {
-        return {.failure = "store interrupt timer stopped unexpectedly"};
-    }
+    // Independent flag read after fired acquired all callback results.
     if (!reads.interrupted.load(std::memory_order_relaxed)) {
-        return {.failure = "a store was not interrupted"};
+        return {.failure = "alarm missed the store"};
     }
-    if (!offset.ok || !reads.old_seen.load(std::memory_order_relaxed) ||
-        !reads.new_seen.load(std::memory_order_relaxed)) {
-        return {.failure = "IRQ did not observe both permitted offsets"};
+    if (time_us_64() - reads.started_us >= IRQ_WINDOW_US) {
+        return {.failure = "store alarm deadline expired"};
     }
-    return {.offset = offset, .failure = {}};
+    if (!stored.ok) {
+        return {.failure = "public setter rejected the aimed store"};
+    }
+    return {.offset = stored, .failure = {}};
 }
 
-// FR-6: validate every IRQ read against the previous offset or this store's
-// new epoch and elapsed uptime. Each marked public call must be interrupted;
-// this observes the public call window, not a particular internal instruction.
+// FR-6: the first store calibrates internally. Aim one alarm at each of the
+// next two stores; an old/new whole read must land inside each marked call.
 [[nodiscard]] IrqResult irq_reads_survive(OffsetRange initial) {
+    if (!initial.ok) {
+        return irq_result(false, "initial clock offset was not applied");
+    }
+    sleep_ms(WRITER_INTERVAL_MS);
+    const auto calibration =
+        write_clock(pico_time::MIN_EPOCH_SECONDS + EPOCH_STEP_SECONDS);
+    if (!calibration.offset.ok) {
+        return irq_result(false, "calibrating store rejected valid time");
+    }
+    if (calibration.duration_us < MIN_AIM_US) {
+        return irq_result(false, "store too short to aim an alarm");
+    }
+    if (calibration.duration_us >= IRQ_WINDOW_US) {
+        return irq_result(false, "calibrating store exceeded alarm deadline");
+    }
     InterruptReads reads;
-    auto previous = initial;
-    for (std::size_t index = 1; index < OFFSET_COUNT; ++index) {
+    auto previous = calibration.offset;
+    for (std::size_t index = 2; index <= STORE_COUNT; ++index) {
         sleep_ms(WRITER_INTERVAL_MS);
         const auto capture = capture_irq_store(
             reads, previous,
-            pico_time::MIN_EPOCH_SECONDS + (index * EPOCH_STEP_SECONDS));
+            pico_time::MIN_EPOCH_SECONDS + (index * EPOCH_STEP_SECONDS),
+            calibration.duration_us);
         if (!capture.failure.empty()) {
             return irq_result(false, capture.failure, &reads);
         }
         previous = capture.offset;
     }
-    return irq_result(true, "each store interrupted; whole offsets observed");
+    return irq_result(true,
+                      "each aimed store interrupted; whole values observed");
 }
 
 }  // namespace
