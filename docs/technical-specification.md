@@ -60,10 +60,10 @@ writer, mainline context only, at most one store per second — and it is a
 statement about the writer, not a caveat on the reader. It holds by
 construction only for `synchronize_ntp()`, which stores once, on success, and
 then returns before any work once the clock is synchronized (NR-4), so stores
-at most once per boot. `apply_wall_clock_time()` and the `settimeofday()` shim over it
-are public and reach the same store with no rate limit, from whatever context
-their caller runs in, so for those two the contract is an obligation on the
-caller. Nothing enforces it, and no test covers its breach.
+at most once per boot. `apply_wall_clock_time()`, `settimeofday()` and
+`_settimeofday()` reach the same store with no rate limit, from whatever context
+their caller runs in, so for these entry points the contract is an obligation
+on the caller. Nothing enforces it, and no test covers its breach.
 
 **FR-7.** Between two synchronizations the clock is monotonic: it advances with
 the SDK counter and does not step. A synchronization may step it in either
@@ -189,9 +189,13 @@ ahead of NR-4.
 **AR-3.** `apply_wall_clock_time()` applies FR-5 and reports refusal through its
 return value.
 
-**AR-4.** `_settimeofday()` validates its argument, and on a negative `tv_sec`,
-a negative `tv_usec`, a `tv_usec` above 999999, or a time outside FR-5's window,
-returns −1 with `errno` set to `EINVAL` and leaves the clock untouched.
+**AR-4.** `settimeofday()` and `_settimeofday()` share validation and the
+`apply_wall_clock_time()` store. A null time pointer, a negative `tv_sec`, a
+negative `tv_usec`, a `tv_usec` above 999999, or a time outside FR-5's window
+returns −1 with `errno` set to `EINVAL` and leaves the clock untouched. A valid
+call returns 0 and sets the clock read by `gettimeofday()`, `time()` and
+`std::chrono::system_clock`. The firmware's `settimeofday()` resolves to the
+library's strong definition rather than the Pico SDK's weak definition.
 
 **AR-5.** A firmware build requires `PICO_LWIPOPTS_TARGET`. Configuration
 fails when it is unset, because the Pico SDK compiles lwIP into this library and
@@ -285,7 +289,7 @@ none of them is ours to change.
 | AR-1 | ctest `pico_time_refuses_discarded_synchronized`; the compiler, through pico-util's `[[nodiscard]]` `Result` | Discarding `is_time_synchronized()` fails to compile with `nodiscard`, while the same call used compiles; every other entry point returns a `Result`, whose discard pico-util refuses, and warnings are errors |
 | AR-2 | `ntp_synchronizer_test.cpp` `RefusesANonPositiveTimeoutWithoutTouchingTheNetwork`; review of `ntp_client.cpp` `synchronize_ntp` for the ceiling and the order | A zero and a negative timeout are each refused with `INVALID_TIMEOUT` before any network call. The `MAX_SYNC_TIMEOUT` ceiling is review-only: it bounds how long a caller may surrender its core, which is a policy of the public entry point rather than of the transport-agnostic synchronizer |
 | AR-3 | Review of `time_keeper.cpp` `apply_wall_clock_time` | It returns `MICROSECONDS_INVALID` for an out-of-range microseconds field and `EPOCH_OUT_OF_RANGE` for an out-of-window epoch, so a caller who passed microseconds-since-epoch into the seconds argument can find that mistake. Review-only: `pico_time_time_sync` is not in the host build — it compiles lwIP and SDK sources — so the only other reference is the firmware consumer smoke build, `tests/consumer/consumer_smoke.cxx`, where linking is the assertion |
-| AR-4 | Review; `time_keeper.cpp` `_settimeofday` | Each refused case returns −1, sets `EINVAL` and returns before the clock is stored |
+| AR-4 | Review; `time_keeper.cpp` setters; firmware `pico_time_settimeofday_probe` map and `arm-none-eabi-nm` | Each refused case returns −1, sets `EINVAL` and returns before the clock is stored; a valid call reaches the shared clock store; the linked `settimeofday` is strong (`T`) and belongs to `time_keeper.cpp.o` |
 | AR-5 | `lwipopts-required` consumer case, a firmware configure without the variable | Configuration fails with the diagnostic naming the variable |
 | AR-6 | `ntp_synchronizer_test.cpp` — `ALookupThatNeverLandsHoldsItsSlot`, `SlotExhaustionIsReportedAndIsRetryable`, `AnAbandonedLookupReleasesItsSlotWhenItLands`, `AResolutionLandingUnderTheLockIsSerialized` | Three attempts abandoned in resolution hold all three slots; the next call fails with `NO_ATTEMPT_SLOT`, opens no endpoint, and reports the failure as retryable; once each abandoned lookup lands its slot is released and a later call synchronizes normally, and a lookup landing under the lock is serialized behind it. That a slot is released exactly once is review-only, of the `resolve_pending` and `abandoned` handshake under the lock. Established here rather than by a device run: a lookup landing after the attempt that started it was torn down is a race the bench cannot induce on demand |
 | AR-7 | `pico-w-refused` and `pico2-refused` consumer cases, a consumer adding the library | On `pico_w` the configure fails saying `PICO_TIME needs PICO_PLATFORM rp2350`; on `pico2`, saying `PICO_TIME needs a board with the CYW43 radio` |

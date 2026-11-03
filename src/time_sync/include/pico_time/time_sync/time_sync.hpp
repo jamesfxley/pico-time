@@ -13,9 +13,10 @@
 /// Wall-clock synchronization for the Pico 2 W.
 ///
 /// The board has no battery-backed RTC: the wall clock is kept as an offset
-/// from the SDK's monotonic microsecond counter, installed into the newlib
-/// _gettimeofday/_settimeofday syscalls so std::chrono::system_clock,
-/// time(), and gettimeofday() all reflect it. Before the first
+/// from the SDK's monotonic microsecond counter. _gettimeofday makes
+/// std::chrono::system_clock, time(), and gettimeofday() all reflect it.
+/// settimeofday() overrides the SDK setter and delegates to _settimeofday();
+/// both validate and update this same clock (AR-4). Before the first
 /// synchronization those clocks count up from boot.
 ///
 /// Every entry point below is [[nodiscard]] and reports failure through its
@@ -86,9 +87,9 @@ inline constexpr auto MAX_SYNC_TIMEOUT = std::chrono::hours(1);
 /// **Caller obligation (FR-6).** Call this from mainline context, from one
 /// caller, and at most once per second. Those are the terms the offset's
 /// publication ring is sized against, and this entry point -- with the
-/// settimeofday() shim over it -- is the only way to reach the ring's writer
-/// without them holding by construction. Nothing enforces them: a caller that
-/// stores in a tight loop can lap the ring inside every attempt of a
+/// settimeofday() and _settimeofday() shims over it -- reaches the ring's
+/// writer without them holding by construction. Nothing enforces them: a caller
+/// that stores in a tight loop can lap the ring inside every attempt of a
 /// concurrent read, which then reports EXHAUSTED, so _gettimeofday() fails with
 /// EAGAIN. Two writers at once, on two cores or one in an interrupt, are not
 /// detected: a read can return a time made of both, and report it as valid.
