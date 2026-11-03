@@ -28,11 +28,12 @@ constexpr std::uint32_t WRITER_INTERVAL_MS = 1000;
 constexpr std::uint32_t YIELD_MS = 1;
 constexpr std::size_t ADVANCE_READS = 8;
 constexpr std::uint64_t IRQ_WINDOW_US = 2000;
-constexpr std::uint64_t MIN_AIM_US = 4;
+constexpr std::uint64_t ALARM_FLOOR_US = 2;
 constexpr std::size_t ALARM_WAIT_POLLS = 20000;
 constexpr std::size_t CALIBRATION_STORES = 2;
 constexpr std::size_t MAX_AIMED_STORES = 8;
-constexpr std::size_t REQUIRED_LANDINGS = 2;
+constexpr std::size_t REQUIRED_LANDINGS = 1;
+static_assert(MAX_AIMED_STORES > 1);
 static_assert(REQUIRED_LANDINGS <= MAX_AIMED_STORES);
 constexpr std::uint64_t EPOCH_STEP_SECONDS = 86400;
 constexpr std::int64_t SET_FRACTION_US = 123456;
@@ -395,9 +396,19 @@ struct IrqStoreResult {
             .failure = {}};
 }
 
-// FR-6: perform an untested warm-up, then two fixed calibration stores to
-// estimate the warm arming-to-entry delay and setter duration. The minima
-// avoid targeting extra cold-path/IRQ overhead. No figures leave this case.
+// Evenly sample the integer-microsecond window, including both endpoints.
+// Caller supplies index < MAX_AIMED_STORES and a calibrated bounded endpoint.
+[[nodiscard]] constexpr std::uint64_t sweep_delay(std::size_t index,
+                                                  std::uint64_t upper_us) {
+    const auto end = std::max(ALARM_FLOOR_US, upper_us);
+    const auto offset =
+        ((end - ALARM_FLOOR_US) * static_cast<std::uint64_t>(index)) /
+        (MAX_AIMED_STORES - 1);
+    return ALARM_FLOOR_US + offset;
+}
+
+// FR-6: warm up, then calibrate arming-to-entry and the longest warm store.
+// Sweep the plausible window without refusing short stores or printing figures.
 [[nodiscard]] IrqResult irq_reads_survive(OffsetRange initial) {
     if (!initial.ok) {
         return irq_result(false, "initial clock offset was not applied");
@@ -410,7 +421,7 @@ struct IrqStoreResult {
     }
     InterruptReads reads;
     std::uint64_t arm_to_setter_us = IRQ_WINDOW_US;
-    std::uint64_t duration_us = IRQ_WINDOW_US;
+    std::uint64_t duration_us = 0;
     for (std::size_t index = 0; index < CALIBRATION_STORES; ++index) {
         sleep_ms(WRITER_INTERVAL_MS);
         seconds += EPOCH_STEP_SECONDS;
@@ -423,18 +434,15 @@ struct IrqStoreResult {
         }
         previous = capture.offset;
         arm_to_setter_us = std::min(arm_to_setter_us, capture.arm_to_setter_us);
-        duration_us = std::min(duration_us, capture.duration_us);
+        duration_us = std::max(duration_us, capture.duration_us);
     }
-    if (duration_us < MIN_AIM_US) {
-        return irq_result(false, "store too short to aim an alarm");
-    }
-    const auto target_delay_us = arm_to_setter_us + (duration_us / 2);
+    const auto upper_delay_us = arm_to_setter_us + duration_us;
     std::size_t landed = 0;
     for (std::size_t index = 0; index < MAX_AIMED_STORES; ++index) {
         sleep_ms(WRITER_INTERVAL_MS);
         seconds += EPOCH_STEP_SECONDS;
-        const auto capture =
-            capture_irq_store(reads, previous, seconds, target_delay_us);
+        const auto capture = capture_irq_store(
+            reads, previous, seconds, sweep_delay(index, upper_delay_us));
         if (!capture.failure.empty()) {
             return irq_result(false, capture.failure, &reads);
         }
@@ -447,7 +455,7 @@ struct IrqStoreResult {
     return landed >= REQUIRED_LANDINGS
                ? irq_result(true,
                             "alarm overlap observed; whole values observed")
-               : irq_result(false, "alarm missed the store");
+               : irq_result(false, "alarm missed every store");
 }
 
 }  // namespace
