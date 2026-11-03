@@ -90,6 +90,19 @@ set(PICO_LWIPOPTS_TARGET "" CACHE STRING "Target carrying the application's lwip
 set(PICO_TIME_WIFI_SSID "" CACHE STRING "Wi-Fi SSID the example firmware should join")
 set(PICO_TIME_WIFI_PASSWORD "" CACHE STRING "Wi-Fi password (WPA2-PSK)")
 
+# VR-7: one selected options target configures both the archive and image.
+# Reuse the fallback header; only this explicit target enables local fixtures.
+if(PROJECT_IS_TOP_LEVEL AND PICO_TIME_BUILD_FIRMWARE)
+    add_library(pico_time_device_lwipopts INTERFACE)
+    target_link_libraries(pico_time_device_lwipopts INTERFACE
+        pico_time_lwipopts_fallback)
+    target_compile_definitions(pico_time_device_lwipopts INTERFACE
+        LWIP_NETIF_LOOPBACK=1 LWIP_HAVE_LOOPIF=1 LWIP_SINGLE_NETIF=0
+        LWIP_NETIF_LOOPBACK_MULTITHREADING=0 MEMP_NUM_UDP_PCB=8
+        DNS_LOCAL_HOSTLIST=1
+        "DNS_LOCAL_HOSTLIST_INIT={DNS_LOCAL_HOSTLIST_ELEM(\"pool.ntp.org\",IPADDR4_INIT_BYTES(127,0,0,1))}")
+endif()
+
 add_subdirectory(src)
 
 if(PICO_TIME_ENABLE_TESTS)
@@ -127,6 +140,10 @@ if(PICO_TIME_ENABLE_INSTALL)
     set(PICO_TIME_EXPORT_TARGETS
         pico_time_strict pico_time_core pico_time_ntp pico_time_time_sync
         pico_time_testing pico_time_lwipopts_fallback)
+    # Internal fixture configuration closes the static archive's link interface.
+    if(PICO_LWIPOPTS_TARGET STREQUAL "pico_time_device_lwipopts")
+        list(APPEND PICO_TIME_EXPORT_TARGETS pico_time_device_lwipopts)
+    endif()
     pico_family_sdk_config_snippet(PICO_TIME_SDK_CONFIG TARGETS ${PICO_TIME_EXPORT_TARGETS})
     house_cxx_install_package(
         PACKAGE pico_time VERSION ${PROJECT_VERSION}

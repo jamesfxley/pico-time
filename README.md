@@ -94,8 +94,18 @@ The installed firmware consumer links the relocated package after initializing
 its own SDK; host installation is refused.
 
 `tests/device/` builds a board-only test image for the newlib clocks, invalid
-POSIX local sets and interrupt reads (`FR-2`, `AR-4`, `FR-6`, `FR-7`). It uses no
-network. `examples/ntp_sync/` provides network validation (`NR-3`, `NR-4`).
+POSIX local sets, interrupt reads and rejection of unrelated NTP replies
+(`FR-2`, `AR-4`, `FR-6`, `FR-7`, `VR-7`). VR-7 uses lwIP loopback without a
+Wi-Fi join; it covers the lwIP glue, not the radio path. Build the board image
+with its options target (the fallback image reports VR-7 FAIL):
+
+```sh
+HOUSE_MATRIX_LWIPOPTS=pico_time_device_lwipopts python3 dev.py build --tree firmware
+```
+
+The target configures both the library archive and the image with the same
+fallback header plus loopback, a local DNS host list and responder resources.
+`examples/ntp_sync/` provides Wi-Fi validation (`NR-3`, `NR-4`).
 Device runs require separate authorization; see the
 [pinned device guide](infra/guides/device.md#device-tests).
 
