@@ -136,6 +136,10 @@ Both reject a null time pointer, invalid fields or an out-of-window epoch with
 returns 0 and updates the clock that the standard clock reads report. The
 timezone pointer is ignored.
 
+pico-time defines `settimeofday()`, `_settimeofday()` and `_gettimeofday()` as
+its clock hooks for the image. A consumer must not define any of these
+functions; duplicate definitions fail the link.
+
 Call it from mainline context, from one caller, and at most once per second.
 `synchronize_ntp()` satisfies that on its own — it stores at most once per
 boot, since once synchronized it returns before any work (NR-4) — but this

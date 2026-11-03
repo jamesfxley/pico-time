@@ -19,6 +19,10 @@
 /// both validate and update this same clock (AR-4). Before the first
 /// synchronization those clocks count up from boot.
 ///
+/// pico-time defines settimeofday(), _settimeofday() and _gettimeofday() as
+/// the image's clock hooks. A consumer must not define any of them; duplicate
+/// definitions fail the link.
+///
 /// Every entry point below is [[nodiscard]] and reports failure through its
 /// return value. The target builds without exceptions, so that value is the
 /// only failure channel there is and discarding it discards the failure
