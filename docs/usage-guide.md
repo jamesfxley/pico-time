@@ -152,4 +152,4 @@ Two writers at once, on two cores or one in an interrupt, are not detected: a
 read can return a time made of both.
 
 `REVISION` takes the full commit ID of the release tag;
-`git rev-parse v0.1.0^{commit}` prints it.
+`git rev-parse v0.2.0^{commit}` prints it.

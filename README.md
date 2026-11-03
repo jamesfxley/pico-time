@@ -25,7 +25,7 @@ what carries a `FR`/`NR`/`VR`/`AR` requirement ID there.
 include(FetchContent)
 FetchContent_Declare(pico_time
     GIT_REPOSITORY https://github.com/jamesfxley/pico-time.git
-    GIT_TAG v0.1.0)  # pin the release you build against
+    GIT_TAG v0.2.0)  # pin the release you build against
 FetchContent_MakeAvailable(pico_time)
 
 target_link_libraries(app PRIVATE pico_time::time_sync)

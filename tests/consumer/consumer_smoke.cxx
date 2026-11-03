@@ -16,7 +16,7 @@
 
 #include "pico_time/pico_time.hpp"
 
-static_assert(pico_time::VERSION_MAJOR == 0 && pico_time::VERSION_MINOR == 1);
+static_assert(pico_time::VERSION_MAJOR == 0 && pico_time::VERSION_MINOR == 2);
 
 #include <pico_time/ntp/ntp_error.hpp>
 #include <pico_time/ntp/ntp_synchronizer.hpp>

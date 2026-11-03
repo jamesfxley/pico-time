@@ -7,7 +7,7 @@ include(cmake/pico_family_bootstrap.cmake)
 # of it.
 pico_family_bootstrap(PICO_TIME PLATFORM rp2350 CYW43)
 
-project(pico_time VERSION 0.1.0 LANGUAGES C CXX ASM)
+project(pico_time VERSION 0.2.0 LANGUAGES C CXX ASM)
 
 house_cxx_common_settings(${PICO_TIME_BUILD_FIRMWARE})
 pico_family_init_sdk(${PICO_TIME_BUILD_FIRMWARE})

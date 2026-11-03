@@ -17,7 +17,7 @@ namespace pico_time {
 /// drift apart. Major version. Changes when a documented interface breaks.
 inline constexpr int VERSION_MAJOR = 0;
 /// Minor version. Changes when the interface grows compatibly.
-inline constexpr int VERSION_MINOR = 1;
+inline constexpr int VERSION_MINOR = 2;
 /// Patch version. Changes when behaviour is corrected within the interface.
 inline constexpr int VERSION_PATCH = 0;
 
