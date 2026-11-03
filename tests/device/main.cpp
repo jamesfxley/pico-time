@@ -6,6 +6,7 @@
 #include <sys/_timeval.h>
 #include <sys/time.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -29,7 +30,10 @@ constexpr std::size_t ADVANCE_READS = 8;
 constexpr std::uint64_t IRQ_WINDOW_US = 2000;
 constexpr std::uint64_t MIN_AIM_US = 4;
 constexpr std::size_t ALARM_WAIT_POLLS = 20000;
-constexpr std::size_t STORE_COUNT = 3;
+constexpr std::size_t CALIBRATION_STORES = 2;
+constexpr std::size_t MAX_AIMED_STORES = 8;
+constexpr std::size_t REQUIRED_LANDINGS = 2;
+static_assert(REQUIRED_LANDINGS <= MAX_AIMED_STORES);
 constexpr std::uint64_t EPOCH_STEP_SECONDS = 86400;
 constexpr std::int64_t SET_FRACTION_US = 123456;
 
@@ -94,7 +98,7 @@ struct TimedStore {
 };
 
 [[nodiscard]] TimedStore write_clock(std::uint64_t seconds) {
-    // T6 calibration: these SDK counter reads immediately bracket the public
+    // These SDK counter reads immediately bracket the public
     // setter. Duration stays internal and is never a result or output value.
     const auto before = time_us_64();
     const auto applied = pico_time::apply_wall_clock_time(
@@ -308,6 +312,9 @@ struct IrqResult {
 
 struct IrqStoreResult {
     OffsetRange offset{};
+    std::uint64_t arm_to_setter_us = 0;
+    std::uint64_t duration_us = 0;
+    bool landed = false;
     std::string_view failure;
 };
 
@@ -328,7 +335,7 @@ struct IrqStoreResult {
 [[nodiscard]] IrqStoreResult capture_irq_store(InterruptReads& reads,
                                                const OffsetRange& old_offset,
                                                std::uint64_t seconds,
-                                               std::uint64_t calibrated_us) {
+                                               std::uint64_t target_delay_us) {
     // No callback is active while resetting the independent flags and
     // immutable expectations. Registration starts access on this core.
     reads.in_progress.store(false, std::memory_order_relaxed);
@@ -340,19 +347,12 @@ struct IrqStoreResult {
         (static_cast<std::int64_t>(seconds) * MICROSECONDS_PER_SECOND) +
         SET_FRACTION_US;
     reads.started_us = time_us_64();
-    const auto target =
-        from_us_since_boot(reads.started_us + (calibrated_us / 2));
-    // pico/time.h:620-638: the default pool dispatches on its core. With
-    // fire_if_past=false a target already passed before/during setup returns
-    // zero, never a synchronous mainline callback. Arming latency may miss
-    // the intended half-duration point; only an observed marker earns PASS.
-    const auto alarm = add_alarm_at(target, read_in_interrupt, &reads, false);
-    if (alarm == 0) {
-        return {.failure = "alarm missed the store: target already passed"};
-    }
-    if (alarm < 0) {
-        return {.failure = "could not arm store alarm"};
-    }
+    const auto target = from_us_since_boot(reads.started_us + target_delay_us);
+    // pico/time.h:620-638: fire_if_past=true still dispatches a passed target,
+    // possibly inside add_alarm_at itself. An inline callback sees the false
+    // marker and misses; a deferred IRQ must observe the setter marker.
+    const auto alarm = add_alarm_at(target, read_in_interrupt, &reads, true);
+    // Keep this path fixed: no alarm-result checks before entering the setter.
     // Counter reads stay outside the marker: an IRQ after the setter returns
     // must be reported as a miss, not coverage of instrumentation.
     const auto before = time_us_64();
@@ -365,21 +365,22 @@ struct IrqStoreResult {
         .lower = reads.new_epoch_us - static_cast<std::int64_t>(after),
         .upper = reads.new_epoch_us - static_cast<std::int64_t>(before),
         .ok = applied.ok() && pico_time::is_time_synchronized()};
-    const bool fired = await_alarm(reads);
+    const bool fired = reads.fired.load(std::memory_order_acquire) ||
+                       (alarm > 0 && await_alarm(reads));
     // pico/time.h:689-696: cancel pending delivery on timeout; false is normal
     // after a one-shot has fired, so it cannot stand in for the fired flag.
-    const bool cancelled = cancel_alarm(alarm);
+    const bool cancelled = alarm > 0 && cancel_alarm(alarm);
+    // A bad read is fatal even when the callback missed the setter window.
+    if (reads.bad_read.load(std::memory_order_acquire)) {
+        return {.failure = "alarm read was not a whole permitted value"};
+    }
+    if (alarm < 0) {
+        return {.failure = "could not arm store alarm"};
+    }
     if (!fired) {
         return {.failure = cancelled
                                ? "alarm never fired before deadline"
                                : "alarm never fired: timer no longer active"};
-    }
-    if (reads.bad_read.load(std::memory_order_acquire)) {
-        return {.failure = "alarm read was not a whole permitted value"};
-    }
-    // Independent flag read after fired acquired all callback results.
-    if (!reads.interrupted.load(std::memory_order_relaxed)) {
-        return {.failure = "alarm missed the store"};
     }
     if (time_us_64() - reads.started_us >= IRQ_WINDOW_US) {
         return {.failure = "store alarm deadline expired"};
@@ -387,42 +388,66 @@ struct IrqStoreResult {
     if (!stored.ok) {
         return {.failure = "public setter rejected the aimed store"};
     }
-    return {.offset = stored, .failure = {}};
+    return {.offset = stored,
+            .arm_to_setter_us = before - reads.started_us,
+            .duration_us = after - before,
+            .landed = reads.interrupted.load(std::memory_order_relaxed),
+            .failure = {}};
 }
 
-// FR-6: the first store calibrates internally. Aim one alarm at each of the
-// next two stores; an old/new whole read must land inside each marked call.
+// FR-6: perform an untested warm-up, then two fixed calibration stores to
+// estimate the warm arming-to-entry delay and setter duration. The minima
+// avoid targeting extra cold-path/IRQ overhead. No figures leave this case.
 [[nodiscard]] IrqResult irq_reads_survive(OffsetRange initial) {
     if (!initial.ok) {
         return irq_result(false, "initial clock offset was not applied");
     }
+    std::uint64_t seconds = pico_time::MIN_EPOCH_SECONDS + EPOCH_STEP_SECONDS;
     sleep_ms(WRITER_INTERVAL_MS);
-    const auto calibration =
-        write_clock(pico_time::MIN_EPOCH_SECONDS + EPOCH_STEP_SECONDS);
-    if (!calibration.offset.ok) {
-        return irq_result(false, "calibrating store rejected valid time");
-    }
-    if (calibration.duration_us < MIN_AIM_US) {
-        return irq_result(false, "store too short to aim an alarm");
-    }
-    if (calibration.duration_us >= IRQ_WINDOW_US) {
-        return irq_result(false, "calibrating store exceeded alarm deadline");
+    auto previous = set_clock(seconds);  // Untested warm-up.
+    if (!previous.ok) {
+        return irq_result(false, "warm-up store rejected valid time");
     }
     InterruptReads reads;
-    auto previous = calibration.offset;
-    for (std::size_t index = 2; index <= STORE_COUNT; ++index) {
+    std::uint64_t arm_to_setter_us = IRQ_WINDOW_US;
+    std::uint64_t duration_us = IRQ_WINDOW_US;
+    for (std::size_t index = 0; index < CALIBRATION_STORES; ++index) {
         sleep_ms(WRITER_INTERVAL_MS);
-        const auto capture = capture_irq_store(
-            reads, previous,
-            pico_time::MIN_EPOCH_SECONDS + (index * EPOCH_STEP_SECONDS),
-            calibration.duration_us);
+        seconds += EPOCH_STEP_SECONDS;
+        // A late one-shot keeps calibration outside the expected store
+        // window while exercising the same arming/call sequence as aiming.
+        const auto capture =
+            capture_irq_store(reads, previous, seconds, IRQ_WINDOW_US / 2);
         if (!capture.failure.empty()) {
             return irq_result(false, capture.failure, &reads);
         }
         previous = capture.offset;
+        arm_to_setter_us = std::min(arm_to_setter_us, capture.arm_to_setter_us);
+        duration_us = std::min(duration_us, capture.duration_us);
     }
-    return irq_result(true,
-                      "each aimed store interrupted; whole values observed");
+    if (duration_us < MIN_AIM_US) {
+        return irq_result(false, "store too short to aim an alarm");
+    }
+    const auto target_delay_us = arm_to_setter_us + (duration_us / 2);
+    std::size_t landed = 0;
+    for (std::size_t index = 0; index < MAX_AIMED_STORES; ++index) {
+        sleep_ms(WRITER_INTERVAL_MS);
+        seconds += EPOCH_STEP_SECONDS;
+        const auto capture =
+            capture_irq_store(reads, previous, seconds, target_delay_us);
+        if (!capture.failure.empty()) {
+            return irq_result(false, capture.failure, &reads);
+        }
+        previous = capture.offset;
+        if (capture.landed) {
+            ++landed;
+        }
+        // Keep all attempts: a bad read after sufficient overlap still fails.
+    }
+    return landed >= REQUIRED_LANDINGS
+               ? irq_result(true,
+                            "alarm overlap observed; whole values observed")
+               : irq_result(false, "alarm missed the store");
 }
 
 }  // namespace
