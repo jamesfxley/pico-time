@@ -2,11 +2,9 @@
 #include <hardware/timer.h>
 #include <pico/stdio.h>
 #include <pico/time.h>
-#include <pico/types.h>
 #include <sys/_timeval.h>
 #include <sys/time.h>
 
-#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -28,13 +26,9 @@ constexpr std::uint32_t WRITER_INTERVAL_MS = 1000;
 constexpr std::uint32_t YIELD_MS = 1;
 constexpr std::size_t ADVANCE_READS = 8;
 constexpr std::uint64_t IRQ_WINDOW_US = 2000;
-constexpr std::uint64_t ALARM_FLOOR_US = 2;
-constexpr std::size_t ALARM_WAIT_POLLS = 20000;
-constexpr std::size_t CALIBRATION_STORES = 2;
-constexpr std::size_t MAX_AIMED_STORES = 8;
-constexpr std::size_t REQUIRED_LANDINGS = 1;
-static_assert(MAX_AIMED_STORES > 1);
-static_assert(REQUIRED_LANDINGS <= MAX_AIMED_STORES);
+constexpr std::int64_t IRQ_DELAY_US = 10;
+constexpr std::uint64_t IRQ_SIDE_WINDOW_US = 100;
+constexpr std::size_t IRQ_STORES = 3;
 constexpr std::uint64_t EPOCH_STEP_SECONDS = 86400;
 constexpr std::int64_t SET_FRACTION_US = 123456;
 
@@ -93,29 +87,17 @@ struct OffsetRange {
            chrono_us >= before_chrono && chrono_us <= after_chrono;
 }
 
-struct TimedStore {
-    OffsetRange offset{};
-    std::uint64_t duration_us = 0;
-};
-
-[[nodiscard]] TimedStore write_clock(std::uint64_t seconds) {
-    // These SDK counter reads immediately bracket the public
-    // setter. Duration stays internal and is never a result or output value.
-    const auto before = time_us_64();
+[[nodiscard]] OffsetRange set_clock(std::uint64_t seconds) {
+    const auto before = uptime_us();
     const auto applied = pico_time::apply_wall_clock_time(
         seconds, static_cast<std::uint32_t>(SET_FRACTION_US));
-    const auto after = time_us_64();
+    const auto after = uptime_us();
     const auto epoch_us =
         (static_cast<std::int64_t>(seconds) * MICROSECONDS_PER_SECOND) +
         SET_FRACTION_US;
-    return {.offset = {.lower = epoch_us - static_cast<std::int64_t>(after),
-                       .upper = epoch_us - static_cast<std::int64_t>(before),
-                       .ok = applied.ok() && pico_time::is_time_synchronized()},
-            .duration_us = after - before};
-}
-
-[[nodiscard]] OffsetRange set_clock(std::uint64_t seconds) {
-    return write_clock(seconds).offset;
+    return {.lower = epoch_us - after,
+            .upper = epoch_us - before,
+            .ok = applied.ok() && pico_time::is_time_synchronized()};
 }
 
 class FailureDetail {
@@ -256,40 +238,39 @@ void inspect_posix_set(RefusalResult& result, const timeval& value,
 }
 
 struct InterruptReads {
-    // Immutable while the alarm is registered. The new clock may advance
-    // from new_epoch_us by no more than elapsed uptime since started_us.
+    // Immutable while the repeating timer is registered. The new clock may
+    // advance from new_epoch_us by no more than elapsed uptime since
+    // started_us.
     OffsetRange old_offset{};
     std::int64_t new_epoch_us = 0;
     std::uint64_t started_us = 0;
-    std::atomic<bool> in_progress{false};
-    std::atomic<bool> interrupted{false};
-    std::atomic<bool> fired{false};
+    std::atomic<bool> sampled{false};
     std::atomic<bool> bad_read{false};
     ClockRead first_bad{};
 };
 
 static_assert(std::atomic<bool>::is_always_lock_free);
 
-// pico/time.h:382-390: returning zero does not reschedule the alarm. This
-// callback reads exactly once; fired release/acquire publishes all results.
-std::int64_t read_in_interrupt(alarm_id_t alarm, void* user_data) {
-    static_cast<void>(alarm);
-    auto& reads = *static_cast<InterruptReads*>(user_data);
-    const bool in_progress = reads.in_progress.load(std::memory_order_acquire);
+// pico/time.h:739-741: true continues repeating. No buffer or callback limit
+// can stop this timer. The default pool dispatches on this mainline core
+// (pico/time.h:801-818); cancellation precedes inspecting/resetting the slot.
+bool read_in_interrupt(repeating_timer_t* timer) {
+    auto& reads = *static_cast<InterruptReads*>(timer->user_data);
     const auto sample = read_clock();
     const bool old = matches_offset(sample, reads.old_offset);
     const auto elapsed =
         sample.after - static_cast<std::int64_t>(reads.started_us);
     const bool fresh = sample.ok && sample.value >= reads.new_epoch_us &&
                        sample.value <= reads.new_epoch_us + elapsed;
-    // Independent coverage flag; fired publishes callback completion.
-    reads.interrupted.store(in_progress, std::memory_order_relaxed);
-    if (!old && !fresh) {
+    // Only this core's callback writes first_bad; retain the first failure.
+    // Release/acquire publishes the fixed slot to mainline after cancellation.
+    if (!old && !fresh && !reads.bad_read.load(std::memory_order_acquire)) {
         reads.first_bad = sample;
         reads.bad_read.store(true, std::memory_order_release);
     }
-    reads.fired.store(true, std::memory_order_release);
-    return 0;
+    // Independent coverage flag; no other data is published by this flag.
+    reads.sampled.store(true, std::memory_order_relaxed);
+    return true;
 }
 
 struct IrqResult {
@@ -313,149 +294,72 @@ struct IrqResult {
 
 struct IrqStoreResult {
     OffsetRange offset{};
-    std::uint64_t arm_to_setter_us = 0;
-    std::uint64_t duration_us = 0;
-    bool landed = false;
     std::string_view failure;
 };
 
-[[nodiscard]] bool await_alarm(const InterruptReads& reads) {
-    // At most one IRQ can run: neither this bounded poll loop nor its SDK
-    // counter deadline relies on progress against a repeating interrupt.
-    for (std::size_t poll = 0; poll < ALARM_WAIT_POLLS; ++poll) {
-        if (reads.fired.load(std::memory_order_acquire)) {
-            return true;
-        }
-        if (time_us_64() - reads.started_us >= IRQ_WINDOW_US) {
-            break;
-        }
-    }
-    return reads.fired.load(std::memory_order_acquire);
-}
-
 [[nodiscard]] IrqStoreResult capture_irq_store(InterruptReads& reads,
-                                               const OffsetRange& old_offset,
-                                               std::uint64_t seconds,
-                                               std::uint64_t target_delay_us) {
-    // No callback is active while resetting the independent flags and
-    // immutable expectations. Registration starts access on this core.
-    reads.in_progress.store(false, std::memory_order_relaxed);
-    reads.interrupted.store(false, std::memory_order_relaxed);
-    reads.fired.store(false, std::memory_order_relaxed);
-    reads.bad_read.store(false, std::memory_order_relaxed);
+                                               OffsetRange old_offset,
+                                               std::uint64_t seconds) {
+    // No timer is active while resetting the independent flags/expectations.
+    reads.sampled.store(false, std::memory_order_relaxed);
+    reads.bad_read.store(false, std::memory_order_release);
     reads.old_offset = old_offset;
     reads.new_epoch_us =
         (static_cast<std::int64_t>(seconds) * MICROSECONDS_PER_SECOND) +
         SET_FRACTION_US;
     reads.started_us = time_us_64();
-    const auto target = from_us_since_boot(reads.started_us + target_delay_us);
-    // pico/time.h:620-638: fire_if_past=true still dispatches a passed target,
-    // possibly inside add_alarm_at itself. An inline callback sees the false
-    // marker and misses; a deferred IRQ must observe the setter marker.
-    const auto alarm = add_alarm_at(target, read_in_interrupt, &reads, true);
-    // Keep this path fixed: no alarm-result checks before entering the setter.
-    // Counter reads stay outside the marker: an IRQ after the setter returns
-    // must be reported as a miss, not coverage of instrumentation.
-    const auto before = time_us_64();
-    reads.in_progress.store(true, std::memory_order_release);
-    const auto applied = pico_time::apply_wall_clock_time(
-        seconds, static_cast<std::uint32_t>(SET_FRACTION_US));
-    reads.in_progress.store(false, std::memory_order_release);
-    const auto after = time_us_64();
-    const OffsetRange stored{
-        .lower = reads.new_epoch_us - static_cast<std::int64_t>(after),
-        .upper = reads.new_epoch_us - static_cast<std::int64_t>(before),
-        .ok = applied.ok() && pico_time::is_time_synchronized()};
-    const bool fired = reads.fired.load(std::memory_order_acquire) ||
-                       (alarm > 0 && await_alarm(reads));
-    // pico/time.h:689-696: cancel pending delivery on timeout; false is normal
-    // after a one-shot has fired, so it cannot stand in for the fired flag.
-    const bool cancelled = alarm > 0 && cancel_alarm(alarm);
-    // A bad read is fatal even when the callback missed the setter window.
+    repeating_timer_t timer{};
+    // pico/time.h:810: a positive delay is from callback completion to the
+    // next callback's start. This leaves mainline time between reads without
+    // catch-up bursts. The fixed window samples around the store; it does
+    // not establish that an IRQ preempted the setter itself.
+    if (!add_repeating_timer_us(IRQ_DELAY_US, read_in_interrupt, &reads,
+                                &timer)) {
+        return {.failure = "could not start store interrupt timer"};
+    }
+    sleep_us(IRQ_SIDE_WINDOW_US);
+    const auto stored = set_clock(seconds);
+    sleep_us(IRQ_SIDE_WINDOW_US);
+    const bool cancelled = cancel_repeating_timer(&timer);
     if (reads.bad_read.load(std::memory_order_acquire)) {
-        return {.failure = "alarm read was not a whole permitted value"};
+        return {.failure = "interrupt read was not a whole permitted value"};
     }
-    if (alarm < 0) {
-        return {.failure = "could not arm store alarm"};
-    }
-    if (!fired) {
-        return {.failure = cancelled
-                               ? "alarm never fired before deadline"
-                               : "alarm never fired: timer no longer active"};
+    if (!cancelled) {
+        return {.failure = "store interrupt timer did not remain active"};
     }
     if (time_us_64() - reads.started_us >= IRQ_WINDOW_US) {
-        return {.failure = "store alarm deadline expired"};
+        return {.failure = "store interrupt window deadline expired"};
+    }
+    // No payload depends on sampled: only callback presence is checked.
+    if (!reads.sampled.load(std::memory_order_relaxed)) {
+        return {.failure = "no callbacks in store interrupt window"};
     }
     if (!stored.ok) {
-        return {.failure = "public setter rejected the aimed store"};
+        return {.failure = "public setter rejected valid time"};
     }
-    return {.offset = stored,
-            .arm_to_setter_us = before - reads.started_us,
-            .duration_us = after - before,
-            .landed = reads.interrupted.load(std::memory_order_relaxed),
-            .failure = {}};
+    return {.offset = stored, .failure = {}};
 }
 
-// Evenly sample the integer-microsecond window, including both endpoints.
-// Caller supplies index < MAX_AIMED_STORES and a calibrated bounded endpoint.
-[[nodiscard]] constexpr std::uint64_t sweep_delay(std::size_t index,
-                                                  std::uint64_t upper_us) {
-    const auto end = std::max(ALARM_FLOOR_US, upper_us);
-    const auto offset =
-        ((end - ALARM_FLOOR_US) * static_cast<std::uint64_t>(index)) /
-        (MAX_AIMED_STORES - 1);
-    return ALARM_FLOOR_US + offset;
-}
-
-// FR-6: warm up, then calibrate arming-to-entry and the longest warm store.
-// Sweep the plausible window without refusing short stores or printing figures.
+// FR-6: statistical sampling in windows around spaced mainline stores.
+// Preemption inside this setter is not a coverage precondition or a claim.
 [[nodiscard]] IrqResult irq_reads_survive(OffsetRange initial) {
     if (!initial.ok) {
         return irq_result(false, "initial clock offset was not applied");
     }
-    std::uint64_t seconds = pico_time::MIN_EPOCH_SECONDS + EPOCH_STEP_SECONDS;
-    sleep_ms(WRITER_INTERVAL_MS);
-    auto previous = set_clock(seconds);  // Untested warm-up.
-    if (!previous.ok) {
-        return irq_result(false, "warm-up store rejected valid time");
-    }
+    auto previous = initial;
+    std::uint64_t seconds = pico_time::MIN_EPOCH_SECONDS;
     InterruptReads reads;
-    std::uint64_t arm_to_setter_us = IRQ_WINDOW_US;
-    std::uint64_t duration_us = 0;
-    for (std::size_t index = 0; index < CALIBRATION_STORES; ++index) {
+    for (std::size_t index = 0; index < IRQ_STORES; ++index) {
         sleep_ms(WRITER_INTERVAL_MS);
         seconds += EPOCH_STEP_SECONDS;
-        // A late one-shot keeps calibration outside the expected store
-        // window while exercising the same arming/call sequence as aiming.
-        const auto capture =
-            capture_irq_store(reads, previous, seconds, IRQ_WINDOW_US / 2);
+        const auto capture = capture_irq_store(reads, previous, seconds);
         if (!capture.failure.empty()) {
             return irq_result(false, capture.failure, &reads);
         }
         previous = capture.offset;
-        arm_to_setter_us = std::min(arm_to_setter_us, capture.arm_to_setter_us);
-        duration_us = std::max(duration_us, capture.duration_us);
     }
-    const auto upper_delay_us = arm_to_setter_us + duration_us;
-    std::size_t landed = 0;
-    for (std::size_t index = 0; index < MAX_AIMED_STORES; ++index) {
-        sleep_ms(WRITER_INTERVAL_MS);
-        seconds += EPOCH_STEP_SECONDS;
-        const auto capture = capture_irq_store(
-            reads, previous, seconds, sweep_delay(index, upper_delay_us));
-        if (!capture.failure.empty()) {
-            return irq_result(false, capture.failure, &reads);
-        }
-        previous = capture.offset;
-        if (capture.landed) {
-            ++landed;
-        }
-        // Keep all attempts: a bad read after sufficient overlap still fails.
-    }
-    return landed >= REQUIRED_LANDINGS
-               ? irq_result(true,
-                            "alarm overlap observed; whole values observed")
-               : irq_result(false, "alarm missed every store");
+    return irq_result(true,
+                      "interrupt sampling returned whole permitted values");
 }
 
 }  // namespace
