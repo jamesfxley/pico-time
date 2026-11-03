@@ -25,8 +25,8 @@ constexpr std::int64_t MICROSECONDS_PER_SECOND = 1'000'000;
 constexpr std::uint32_t WRITER_INTERVAL_MS = 1000;
 constexpr std::uint32_t YIELD_MS = 1;
 constexpr std::size_t ADVANCE_READS = 8;
-constexpr std::int32_t IRQ_INTERVAL_MS = 10;
-constexpr std::uint32_t IRQ_DRAIN_MS = 20;
+constexpr std::int64_t IRQ_INTERVAL_US = 1;
+constexpr std::uint32_t IRQ_DRAIN_US = 100;
 constexpr std::size_t IRQ_CAPACITY = 256;
 constexpr std::size_t OFFSET_COUNT = 3;
 constexpr std::uint64_t EPOCH_STEP_SECONDS = 86400;
@@ -87,12 +87,21 @@ struct OffsetRange {
            chrono_us >= before_chrono && chrono_us <= after_chrono;
 }
 
-[[nodiscard]] OffsetRange set_clock(std::uint64_t seconds) {
+[[nodiscard]] OffsetRange set_clock(std::uint64_t seconds,
+                                    std::atomic<bool>* in_progress = nullptr) {
     const auto before = uptime_us();
+    // Release/acquire keeps the marker around the public setter, so an IRQ
+    // observing true establishes the coverage precondition for this call.
+    if (in_progress != nullptr) {
+        in_progress->store(true, std::memory_order_release);
+    }
     const bool applied =
         pico_time::apply_wall_clock_time(
             seconds, static_cast<std::uint32_t>(SET_FRACTION_US))
             .ok();
+    if (in_progress != nullptr) {
+        in_progress->store(false, std::memory_order_release);
+    }
     const auto after = uptime_us();
     const auto epoch_us =
         (static_cast<std::int64_t>(seconds) * MICROSECONDS_PER_SECOND) +
@@ -243,6 +252,8 @@ struct InterruptReads {
     std::array<ClockRead, IRQ_CAPACITY> samples{};
     std::atomic<std::size_t> count{0};
     std::atomic<bool> overflow{false};
+    std::atomic<bool> in_progress{false};
+    std::atomic<bool> interrupted{false};
 };
 
 static_assert(std::atomic<std::size_t>::is_always_lock_free);
@@ -254,6 +265,10 @@ static_assert(std::atomic<bool>::is_always_lock_free);
 // before mainline inspects them. No output or allocation runs in the IRQ.
 bool read_in_interrupt(repeating_timer_t* timer) {
     auto& reads = *static_cast<InterruptReads*>(timer->user_data);
+    if (reads.in_progress.load(std::memory_order_acquire)) {
+        // Independent coverage flag; sample data is published through count.
+        reads.interrupted.store(true, std::memory_order_relaxed);
+    }
     // This count has one writer and is not used to acquire sample contents.
     const auto index = reads.count.load(std::memory_order_relaxed);
     if (index == reads.samples.size()) {
@@ -268,27 +283,44 @@ bool read_in_interrupt(repeating_timer_t* timer) {
 
 // FR-6: three widely separated offsets exercise both halves of the offset.
 // Every IRQ sample must match a complete published offset and its own uptime
-// bracket. This workload does not claim to force preemption at a store.
-[[nodiscard]] bool irq_reads_survive(OffsetRange initial) {
+// bracket. Each setter call must be preempted while its marker is active.
+// This establishes overlap with the public call, not an internal instruction.
+struct IrqResult {
+    bool passed = false;
+    std::string_view detail;
+};
+
+[[nodiscard]] IrqResult irq_reads_survive(OffsetRange initial) {
     static InterruptReads reads;
     std::array<OffsetRange, OFFSET_COUNT> offsets{initial};
-    repeating_timer_t timer{};
-    sleep_ms(WRITER_INTERVAL_MS);
-    if (!add_repeating_timer_ms(IRQ_INTERVAL_MS, read_in_interrupt, &reads,
-                                &timer)) {
-        return false;
-    }
-    sleep_ms(IRQ_DRAIN_MS);
     for (std::size_t index = 1; index < offsets.size(); ++index) {
-        offsets[index] = set_clock(pico_time::MIN_EPOCH_SECONDS +
-                                   (index * EPOCH_STEP_SECONDS));
         sleep_ms(WRITER_INTERVAL_MS);
+        // No callback is active here. This flag carries no sample data.
+        reads.interrupted.store(false, std::memory_order_relaxed);
+        repeating_timer_t timer{};
+        // pico/time.h:801-818: a positive microsecond delay schedules from
+        // callback completion, leaving mainline time between IRQ callbacks.
+        if (!add_repeating_timer_us(IRQ_INTERVAL_US, read_in_interrupt, &reads,
+                                    &timer)) {
+            return {.detail = "could not start store interrupt"};
+        }
+        sleep_us(IRQ_DRAIN_US);
+        offsets[index] = set_clock(
+            pico_time::MIN_EPOCH_SECONDS + (index * EPOCH_STEP_SECONDS),
+            &reads.in_progress);
+        sleep_us(IRQ_DRAIN_US);
+        if (!cancel_repeating_timer(&timer)) {
+            return {.detail = "store interrupt timer did not remain active"};
+        }
+        // Cancellation on the callback's core ends all writes. This flag
+        // carries no sample data; count's release/acquire publishes those.
+        if (!reads.interrupted.load(std::memory_order_relaxed)) {
+            return {.detail = "a store was not interrupted"};
+        }
     }
-    const bool cancelled = cancel_repeating_timer(&timer);
     const auto count = reads.count.load(std::memory_order_acquire);
     // Independent failure flag; no data is acquired through it.
-    bool passed = cancelled &&
-                  !reads.overflow.load(std::memory_order_relaxed) &&
+    bool passed = !reads.overflow.load(std::memory_order_relaxed) &&
                   count > 0 && count <= reads.samples.size();
     std::array<bool, OFFSET_COUNT> observed{};
     for (std::size_t index = 0; index < count && index < reads.samples.size();
@@ -305,7 +337,9 @@ bool read_in_interrupt(repeating_timer_t* timer) {
     for (const bool seen : observed) {
         passed = seen && passed;
     }
-    return passed;
+    return {.passed = passed,
+            .detail = passed ? "each store interrupted; whole offsets observed"
+                             : "IRQ reads did not match every stored offset"};
 }
 
 }  // namespace
@@ -325,8 +359,8 @@ int main() {
     run.check("FR-7", "newlib-clock-advances-without-resetting-offset",
               clock_advances(initial),
               "advances across yields with fixed offset");
-    run.check("FR-6", "irq-clock-read-survives-mainline-set",
-              irq_reads_survive(initial),
-              "IRQ reads match whole stored offsets");
+    const auto irq = irq_reads_survive(initial);
+    run.check("FR-6", "irq-clock-read-survives-mainline-set", irq.passed,
+              irq.detail);
     run.finish();
 }
