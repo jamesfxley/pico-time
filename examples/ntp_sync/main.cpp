@@ -1,21 +1,8 @@
 // SPDX-License-Identifier: MIT
-// Device validation for pico-time.
-//
-// Establishes the traceability rows the host suite cannot reach, because they
-// are properties of the SDK counter, the radio and the newlib link rather than
-// of the portable core: FR-2 (pre-sync reads count from boot), FR-7 (the clock
-// advances monotonically between syncs) and NR-4 (an already-synchronized call
-// returns without traffic). NR-3 is not among them: the retry structure is
-// transport-independent and is established on the host, and this example keeps
-// no capture of it -- see the README for the local edit that makes it
-// observable.
-//
-// Read the serial log from before the reset: the whole sequence is logged at
-// boot and the board is quiet afterwards.
+// Device validation for pre-sync reads, monotonic reads and repeat calls
+// (FR-2, FR-7, NR-4). Host tests cover retries (NR-3).
+// Capture serial output before reset. All output occurs at boot.
 
-// The specific SDK headers rather than the pico/stdlib.h umbrella: they are
-// public headers, and naming them is what lets include-cleaner check this file
-// instead of reporting the umbrella as unused.
 #include <pico/cyw43_arch.h>
 #include <pico/stdio.h>
 #include <pico/time.h>
@@ -42,8 +29,8 @@ void log_wall_clock(const char* label) {
     struct tm utc{};
     std::array<char, TIME_STRING_SIZE> formatted{};
 
-    // A failed conversion, or a failed format, leaves the marker rather than a
-    // plausible-looking wrong time.
+    // Conversion failure prints an unavailable marker, not a plausible wrong
+    // time.
     if (gmtime_r(&now, &utc) == nullptr ||
         std::strftime(formatted.data(), formatted.size(), "%Y-%m-%d %H:%M:%S",
                       &utc) == 0) {
@@ -55,12 +42,7 @@ void log_wall_clock(const char* label) {
                   << " (" << formatted.data() << " UTC)";
 }
 
-/// Stop here without returning from main().
-///
-/// Returning ends the program, and with it the SDK's servicing of USB: the tail
-/// of the log is lost, and the 1200-baud BOOTSEL touch stops working, so a
-/// board that failed early can only be recovered by physically replugging it.
-/// Parking keeps the port alive and the board reflashable.
+/// Keep USB servicing active without returning from main().
 [[noreturn]] void park(const char* reason) {
     PICO_LOG_INFO << "Parked (" << reason << "); USB stays live for reflash";
     while (true) {
@@ -69,11 +51,8 @@ void log_wall_clock(const char* label) {
 }
 
 bool join_wifi() {
-    // PICO_TIME_WIFI_SSID is a compile definition and is empty only in an
-    // unconfigured build, which is worth saying plainly rather than failing to
-    // associate. Constructed with an explicit length from the literal: in an
-    // unconfigured build the macro is "", and a single-argument construction
-    // from it reads to analysis as a redundant initialization.
+    // An explicit length avoids a redundant-initialisation diagnostic when
+    // the macro is "".
     constexpr std::string_view SSID(PICO_TIME_WIFI_SSID,
                                     sizeof(PICO_TIME_WIFI_SSID) - 1);
     if (SSID.empty()) {
@@ -86,8 +65,7 @@ bool join_wifi() {
     cyw43_arch_enable_sta_mode();
     PICO_LOG_INFO << "Joining " << SSID.data();
 
-    // include-cleaner does not count a macro expansion as a use of its header,
-    // so it reports no header providing the SDK's auth-mode constant.
+    // misc-include-cleaner does not attribute the SDK auth macro to its header.
     // NOLINTNEXTLINE(misc-include-cleaner)
     constexpr std::uint32_t AUTH_MODE = CYW43_AUTH_WPA2_AES_PSK;
     if (cyw43_arch_wifi_connect_timeout_ms(PICO_TIME_WIFI_SSID,
@@ -115,8 +93,7 @@ int main() {
         park("cyw43_arch_init failed");
     }
 
-    // FR-2: before any synchronization these read as time since boot, so the
-    // epoch value here must be small (single-digit seconds), not a 2020s date.
+    // Pre-sync epoch seconds must be small, counting from boot (FR-2).
     PICO_LOG_INFO << "synchronized=" << pico_time::is_time_synchronized();
     log_wall_clock("pre-sync");
 
@@ -124,9 +101,8 @@ int main() {
         park("Wi-Fi association failed");
     }
 
-    // NR-3: on failure this is three attempts, each bounded by the timeout.
-    // The error says which failure it was, and whether retrying could clear
-    // it (AR-6).
+    // Up to three bounded attempts report their error and retryability (NR-3,
+    // AR-6).
     if (const auto synced = pico_time::synchronize_ntp(); !synced.ok()) {
         PICO_LOG_ERROR << "NTP synchronization failed: "
                        << pico_time::describe(synced.error())
@@ -137,13 +113,13 @@ int main() {
     }
     log_wall_clock("post-sync");
 
-    // NR-4: already synchronized, so this must succeed immediately and log no
-    // DNS or NTP activity at all.
+    // With the clock set, this call must succeed immediately and log no DNS or
+    // NTP activity (NR-4).
     PICO_LOG_INFO << "Re-synchronizing (expect an immediate ok, no traffic)";
     const auto again = pico_time::synchronize_ntp();
     PICO_LOG_INFO << "second synchronize_ntp() ok=" << again.ok();
 
-    // FR-7: the clock advances with the monotonic counter and does not step.
+    // Between sets, the clock advances without stepping (FR-7).
     sleep_ms(OBSERVATION_DELAY_MS);
     log_wall_clock("after 3s");
 
