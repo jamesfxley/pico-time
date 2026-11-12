@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
-// The validation rules of VR-1..VR-6, each at its boundary, and the request
-// side of NR-1, NR-2, NR-5 and NR-6.
-//
-// Every case here is one an attacker or a broken server can put on the wire,
-// and none of them is reachable on device without standing up a hostile NTP
-// server -- which is the reason parse_ntp_response() is a pure function over
-// 48 bytes rather than something welded to a pbuf.
+// Wire validation boundaries (VR-1..VR-6) and requests (NR-1, NR-2, NR-5,
+// NR-6).
 
 #include "ntp_message.hpp"
 
@@ -25,16 +20,13 @@ using pico_time::NTP_MESSAGE_LENGTH;
 using pico_time::NtpParse;
 using pico_time::NtpReject;
 
-// Seconds between the NTP epoch (1900) and the Unix epoch (1970). Named
-// because every field value below is derived from it.
+// Seconds between the NTP epoch (1900) and the Unix epoch (1970).
 constexpr std::uint64_t NTP_DELTA = 2208988800ULL;
 
 // One NTP era: the span of the 32-bit seconds field.
 constexpr std::uint64_t NTP_ERA_SECONDS = 4294967296ULL;
 
-// The first instant of era 1, 2036-02-07T06:28:16Z, as a Unix epoch second.
-// Where the window sits relative to this is what decides which eras a build
-// can accept at all.
+// First instant of era 1, 2036-02-07T06:28:16Z, in Unix epoch seconds.
 constexpr std::uint64_t FIRST_ERA1_EPOCH = NTP_ERA_SECONDS - NTP_DELTA;
 
 constexpr std::uint64_t TEST_NONCE = 0x0123456789ABCDEFULL;
@@ -131,8 +123,6 @@ class Message {
     std::array<std::uint8_t, NTP_MESSAGE_LENGTH> bytes_{};
 };
 
-// --- the happy path, so every rejection below is attributable ---------------
-
 TEST(NtpMessage, AcceptsAWellFormedServerReply) {
     const NtpParse parse = Message().parse();
 
@@ -145,7 +135,7 @@ TEST(NtpMessage, AcceptsAWellFormedServerReply) {
     EXPECT_EQ(parse.sample->epoch_microseconds, 0U);
 }
 
-// --- VR-1: mode ------------------------------------------------------------
+// Mode validation (VR-1).
 
 TEST(NtpMessage, RejectsAnythingButAServerReply) {
     EXPECT_EQ(Message().mode(Message::MODE_CLIENT).parse().reason,
@@ -154,12 +144,10 @@ TEST(NtpMessage, RejectsAnythingButAServerReply) {
     EXPECT_EQ(Message().mode(0).parse().reason, NtpReject::MODE);
 }
 
-// --- VR-2: leap indicator --------------------------------------------------
+// Leap indicator validation (VR-2).
 
 TEST(NtpMessage, RejectsTheLeapAlarmCondition) {
-    // LI 3 means the server's own clock is not synchronized. Before this check
-    // existed the two leap bits were masked away entirely, so a server
-    // advertising an unusable clock set this board's.
+    // LI 3 denotes an unsynchronised server clock (RFC 5905 §7.3).
     EXPECT_EQ(Message().leap(Message::LEAP_ALARM).parse().reason,
               NtpReject::LEAP_ALARM);
 }
@@ -171,7 +159,7 @@ TEST(NtpMessage, AcceptsThePendingLeapSecondIndicators) {
     }
 }
 
-// --- VR-3: stratum ---------------------------------------------------------
+// Stratum validation (VR-3).
 
 TEST(NtpMessage, RejectsUnusableStrata) {
     EXPECT_EQ(Message().stratum(0).parse().reason, NtpReject::STRATUM)
@@ -188,7 +176,7 @@ TEST(NtpMessage, AcceptsPrimaryAndSecondaryStrata) {
     EXPECT_EQ(Message().stratum(15).parse().reason, NtpReject::NONE);
 }
 
-// --- VR-4: the anti-replay nonce -------------------------------------------
+// Anti-replay nonce validation (VR-4).
 
 TEST(NtpMessage, RejectsAReplyToADifferentRequest) {
     EXPECT_EQ(Message().originate(TEST_NONCE + 1).parse().reason,
@@ -198,9 +186,7 @@ TEST(NtpMessage, RejectsAReplyToADifferentRequest) {
 }
 
 TEST(NtpMessage, RejectsAReplayedCapture) {
-    // A genuine reply, captured and replayed against a later request. Every
-    // other field is valid -- the nonce is the only thing that distinguishes
-    // it, which is the whole anti-replay story in unauthenticated SNTP.
+    // A captured reply has valid fields but the previous request's nonce.
     const Message captured;
     constexpr std::uint64_t LATER_REQUEST_NONCE = 0xFEDCBA9876543210ULL;
 
@@ -210,11 +196,8 @@ TEST(NtpMessage, RejectsAReplayedCapture) {
 }
 
 TEST(NtpMessage, AnUnauthenticatedDatagramIsOnlyEverAnOriginateMismatch) {
-    // VR-4 runs ahead of every content check, so a datagram that has not shown
-    // it belongs to this request cannot be reported as anything else however
-    // else it is malformed. The caller relies on exactly that to drop it
-    // without ending the attempt (VR-7); any other verdict reachable from an
-    // unauthenticated datagram is a denial-of-synchronization channel.
+    // A nonce mismatch takes precedence over malformed content so the caller
+    // can drop the datagram without ending the attempt (VR-4, VR-7).
     constexpr std::uint64_t NOT_OURS = TEST_NONCE + 1;
 
     EXPECT_EQ(Message().originate(NOT_OURS).mode(0).parse().reason,
@@ -230,13 +213,10 @@ TEST(NtpMessage, AnUnauthenticatedDatagramIsOnlyEverAnOriginateMismatch) {
               NtpReject::ORIGINATE_MISMATCH);
 }
 
-// --- VR-5: the zero timestamp ----------------------------------------------
+// Zero timestamp rejection (VR-5).
 
 TEST(NtpMessage, RejectsAnUnsetTransmitTimestamp) {
-    // A stratum-1 server that has never synchronized sends zero here. Zero is
-    // refused for being unset rather than left to the window, because a window
-    // that reaches era 1 would read it as a real instant just past the
-    // rollover -- and refusing it here holds whatever the window is.
+    // Zero is rejected before era rebasing can place it in 2036.
     const NtpParse parse = Message().transmit_seconds(0).parse();
 
     EXPECT_EQ(parse.reason, NtpReject::TIMESTAMP_ZERO);
@@ -252,12 +232,10 @@ TEST(NtpMessage, RejectsAnUnsetTimestampEvenWithANonZeroFraction) {
               NtpReject::TIMESTAMP_ZERO);
 }
 
-// --- VR-6: the plausibility window and the 2036 rollover -------------------
+// Plausibility window and 2036 rollover cases (VR-6).
 
 TEST(NtpMessage, RejectsATimestampBelowThePlausibilityFloor) {
-    // One second below the floor, and a 1995 timestamp: both are era-0 values
-    // that rebase cleanly and are simply too old to be a time this firmware
-    // could legitimately be told.
+    // Both timestamps predate the floor but can be rebased in era 0.
     const auto just_below =
         static_cast<std::uint32_t>(MIN_EPOCH_SECONDS + NTP_DELTA - 1);
     EXPECT_EQ(Message().transmit_seconds(just_below).parse().reason,
@@ -295,9 +273,7 @@ TEST(NtpMessage, AcceptsTheSecondBelowThePlausibilityCeiling) {
 }
 
 TEST(NtpMessage, RejectsATimestampAtAndAboveThePlausibilityCeiling) {
-    // The half-open end of the window, which a message can only reach because
-    // the ceiling sits inside the range the rebase produces. A ceiling above
-    // that range is one no reply can ever be refused by.
+    // The exclusive ceiling is reachable by an era-0 timestamp.
     const auto at_ceiling =
         static_cast<std::uint32_t>(MAX_EPOCH_SECONDS + NTP_DELTA);
     EXPECT_EQ(Message().transmit_seconds(at_ceiling).parse().reason,
@@ -308,17 +284,14 @@ TEST(NtpMessage, RejectsATimestampAtAndAboveThePlausibilityCeiling) {
         << "the last second of era 0 is 2036-02-07, past the ceiling";
 }
 
-// NR-5. The era is chosen by the window, so which era a build accepts follows
-// from where its window sits. This one predates the 2036-02-07 rollover, so
-// era 1 is out of reach: no field value can be read into it and be accepted.
+// The configured window excludes all era-1 timestamps (NR-5).
 TEST(NtpMessage, RefusesEveryEra1FieldWhileTheWindowPredatesTheRollover) {
     static_assert(MAX_EPOCH_SECONDS < FIRST_ERA1_EPOCH,
                   "this test states what the window's position implies; a "
                   "window reaching past the rollover needs the opposite case");
 
-    // Field 1 reads as 2036-02-07T06:28:17Z under era 1 and as nothing at all
-    // under era 0. A window that accepts it is a window one forged datagram
-    // steps the clock a decade across.
+    // Field 1 represents 2036-02-07T06:28:17Z in era 1 and predates 1970 in era
+    // 0.
     EXPECT_EQ(Message().transmit_seconds(1).parse().reason,
               NtpReject::TIMESTAMP_IMPLAUSIBLE);
 
@@ -333,23 +306,16 @@ TEST(NtpMessage, RefusesEveryEra1FieldWhileTheWindowPredatesTheRollover) {
         << "the first era-0 field is 1970, below the floor";
 }
 
-// FR-8, NR-5. The invariant the era choice rests on: two readings of a field
-// differ by exactly one era, so a window narrower than an era can hold at most
-// one of them. Widening the window past this makes a field value mean two
-// accepted instants with nothing in the message to separate them.
+// A window narrower than an era admits at most one candidate (FR-8, NR-5).
 TEST(NtpMessage, ThePlausibilityWindowIsNarrowerThanAnNtpEra) {
     EXPECT_LT(pico_time::EPOCH_WINDOW_SECONDS, NTP_ERA_SECONDS);
     EXPECT_EQ(MAX_EPOCH_SECONDS - MIN_EPOCH_SECONDS,
               pico_time::EPOCH_WINDOW_SECONDS);
 }
 
-// --- The fraction conversion ------------------------------------------------
-
-// NR-6.
+// Fraction conversion (NR-6).
 TEST(NtpMessage, ConvertsTheFractionExactly) {
-    // Integer arithmetic, not a double multiply: the double form linked the
-    // whole soft-float runtime into the firmware image. The top of the range
-    // must land on 999999 without a clamp.
+    // The largest fraction must produce 999999 microseconds without clamping.
     struct Case {
         std::uint32_t fraction;
         std::uint32_t microseconds;
@@ -375,17 +341,14 @@ TEST(NtpMessage, ConvertsTheFractionExactly) {
     }
 }
 
-// --- The request, and the round trip that ties it to the check -------------
-
-// NR-1 (the request's own shape) and NR-2 (the nonce it carries).
+// The request carries client flags and a nonce (NR-1, NR-2).
 TEST(NtpMessage, BuildsAClientRequestCarryingTheNonce) {
     constexpr std::uint8_t CLIENT_FLAGS = 0x1BU;  // LI 0, VN 3, Mode 3
     const auto request = pico_time::build_ntp_request(TEST_NONCE);
 
     EXPECT_EQ(request[0], CLIENT_FLAGS);
 
-    // The nonce must land in the transmit field, because that is the field the
-    // server echoes into originate and parse_ntp_response() compares.
+    // The nonce must occupy transmit, which the server echoes as originate.
     std::uint64_t transmitted = 0;
     for (std::size_t i = 40; i < 48; ++i) {
         transmitted = (transmitted << 8U) | request[i];
@@ -394,10 +357,8 @@ TEST(NtpMessage, BuildsAClientRequestCarryingTheNonce) {
 }
 
 TEST(NtpMessage, RequestAndResponseAgreeOnWhereTheNonceLives) {
-    // The end-to-end property: whatever build_ntp_request() puts on the wire
-    // is what a compliant server echoes back, and parse_ntp_response() must
-    // accept exactly that. A round trip catches an offset mismatch between the
-    // two that neither side's own test would.
+    // The parser must accept the request nonce echoed in the originate field.
+    // A round trip exposes mismatched field offsets.
     constexpr std::uint64_t NONCE = 0xDEADBEEFCAFEF00DULL;
     const auto request = pico_time::build_ntp_request(NONCE);
 

@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: MIT
-// AR-1 as a build failure. With PROBE undefined this compiles and is part of
-// every build, so the probe itself is sound; PROBE=1 discards the one public
-// entry point whose status is a bool rather than a pico_util::Result, which
-// the library promises to refuse.
+// The default probe compiles. PROBE=1 discards a nodiscard bool result (AR-1).
 #include "pico_time/time_sync/time_sync.hpp"
 
 namespace {

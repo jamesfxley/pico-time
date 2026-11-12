@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: MIT
-// The attempt loop and the slot pool, driven against a scripted transport: the
-// NR-3 retry structure, the AR-2 argument refusal, the AR-6 slot-exhaustion
-// return, and the release protocol for a lookup that lands after the attempt
-// which started it was torn down. The last is the subtlest code in this library
-// and is reachable only from here -- a run on hardware exercises one
-// interleaving and cannot induce it.
+// Scripted retry, timeout and slot-release cases (NR-3, AR-2, AR-6).
 #include <gtest/gtest.h>
 
 #include <array>
@@ -22,10 +17,6 @@ namespace {
 
 using pico_time::testing::FakeNtpTransport;
 
-// Named rather than spelled with a chrono literal at each call: the literal
-// needs a using-directive this file would otherwise carry a suppression for,
-// and the timeout is scaffolding in most of these tests rather than the case
-// under test.
 constexpr auto SHORT_TIMEOUT = std::chrono::milliseconds(200);
 constexpr auto GENEROUS_TIMEOUT = std::chrono::milliseconds(1000);
 constexpr auto NO_TIMEOUT = std::chrono::milliseconds(0);
@@ -33,17 +24,14 @@ constexpr auto NO_TIMEOUT = std::chrono::milliseconds(0);
 // Where a 32-bit millisecond counter returns to zero.
 constexpr std::uint64_t CLOCK_WRAP_32 = 0x100000000U;
 
-// Offsets and constants of the SNTP wire format, spelled here rather than
-// reached from the module's private header: a test that builds its input with
-// the same code that parses it cannot detect a change in either.
+// Independent wire constants keep input construction separate from parsing.
 constexpr std::size_t MESSAGE_LENGTH = 48;
 constexpr std::size_t ORIGINATE_OFFSET = 24;
 constexpr std::size_t TRANSMIT_OFFSET = 40;
 constexpr std::uint32_t NTP_ERA_OFFSET = 2208988800U;
 constexpr std::uint64_t EPOCH_SECONDS = 1767225600U;  // 2026-01-01Z
 
-/// A well-formed server reply to `nonce`, inside the plausibility window VR-6
-/// enforces so the decoded value is checkable rather than merely present.
+/// A reply to nonce with a checkable time inside the window (VR-6).
 std::vector<std::uint8_t> good_reply(std::uint64_t nonce) {
     std::vector<std::uint8_t> reply(MESSAGE_LENGTH, 0);
     reply[0] = 0x24;  // leap 0, version 4, mode 4 (server)
@@ -61,10 +49,7 @@ std::vector<std::uint8_t> good_reply(std::uint64_t nonce) {
     return reply;
 }
 
-/// Arrange a transport whose lookup answers from cache and whose reply lands on
-/// the first poll -- the shape every test that is not about failure starts
-/// from. By reference rather than returned: a fake is registered with the
-/// policy by reference, so it is not copyable or movable.
+/// Script a cached lookup and a reply on the first poll.
 void arrange_answering(FakeNtpTransport& transport) {
     transport.set_resolve_result(ResolveStatus::RESOLVED);
     transport.arrive_on_poll(1, FakeNtpTransport::address(1),
@@ -82,10 +67,8 @@ TEST(NtpSynchronizer, AcceptsAReplyAndReportsTheTime) {
     EXPECT_EQ(result.value().epoch_seconds, EPOCH_SECONDS);
     EXPECT_EQ(transport.open_calls(), 1U);
     EXPECT_EQ(transport.send_calls(), 1U);
-    // Closed exactly once, and left closed. That the close happens before the
-    // caller reads the sample is a property of run_attempt's ordering, not one
-    // these assertions establish: this fake delivers only from poll(), so it
-    // cannot place a second datagram after the close even in principle.
+    // These assertions check closure, not its order relative to reading sample.
+    // The fake cannot deliver a datagram outside poll().
     EXPECT_EQ(transport.close_calls(), 1U);
     EXPECT_FALSE(transport.is_open());
     EXPECT_EQ(sync.slots_in_use(), 0U);
@@ -122,11 +105,8 @@ TEST(NtpSynchronizer, TriesEveryAttemptBeforeGivingUp) {
     EXPECT_EQ(sync.slots_in_use(), 0U);
 }
 
-// CXX-08.6. The counter a real transport reads is 32 bits wide, so an attempt
-// started within its timeout of the wrap has an absolute deadline the counter
-// can never reach. What that costs is not a late timeout but no timeout at all:
-// the wait for a reply that never comes is the one this library exists to
-// bound, and it is exactly the one that would never end.
+// A narrowing test clock exercises wrap during an attempt.
+// The production adapter supplies 64-bit milliseconds.
 TEST(NtpSynchronizer, AnAttemptSpanningTheClockWrapStillTimesOut) {
     FakeNtpTransport transport;
     transport.set_resolve_result(ResolveStatus::RESOLVED);
@@ -195,8 +175,7 @@ TEST(NtpSynchronizer, AnEndpointThatWillNotOpenIsNotADnsFailure) {
     ASSERT_FALSE(result.ok());
     EXPECT_EQ(result.error(), NtpError::SOCKET_FAILED);
     EXPECT_EQ(transport.resolve_calls(), 0U);
-    // An exhausted UDP pcb pool, not a refusal: it clears when whatever else
-    // in the image is holding the pool lets go.
+    // Socket creation failure is retryable.
     EXPECT_TRUE(retryable(result.error()));
 }
 
@@ -210,19 +189,15 @@ TEST(NtpSynchronizer, ASendFailureEndsTheAttempt) {
 
     ASSERT_FALSE(result.ok());
     EXPECT_EQ(result.error(), NtpError::SEND_FAILED);
-    // Momentarily out of pbufs is a condition to retry, not to give up on.
+    // Send failure is retryable.
     EXPECT_TRUE(retryable(result.error()));
 }
 
-// A rejection does not stop the loop: pool.ntp.org resolves to a different
-// server each lookup, so the next attempt asks a different machine. What
-// changes is what the caller is told when every attempt is refused -- a server
-// that reported its own state, rather than a link that went quiet.
+// Exhausted attempts report the final rejection.
 TEST(NtpSynchronizer, ARefusedReplyReportsWhyRatherThanTimingOut) {
     FakeNtpTransport transport;
     transport.set_resolve_result(ResolveStatus::RESOLVED);
-    // Replies that echo each attempt's nonce, so each is that exchange's, but
-    // declare themselves a client rather than a server (VR-1).
+    // Each reply echoes its request nonce but reports client mode (VR-1).
     for (std::size_t attempt = 1; attempt <= MAX_REQUEST_ATTEMPTS; ++attempt) {
         std::vector<std::uint8_t> reply = good_reply(attempt);
         reply[0] = 0x23;  // mode 3
@@ -234,14 +209,12 @@ TEST(NtpSynchronizer, ARefusedReplyReportsWhyRatherThanTimingOut) {
 
     ASSERT_FALSE(result.ok());
     EXPECT_EQ(result.error(), NtpError::REJECTED_MODE);
-    // A refused reply will not clear on its own, so a caller retrying in a loop
-    // is wasting its time.
+    // Reply rejection is classified as non-retryable.
     EXPECT_FALSE(retryable(result.error()));
     EXPECT_EQ(transport.send_calls(), MAX_REQUEST_ATTEMPTS);
 }
 
-// The counterpart: one refused reply does not condemn the call, because the
-// next attempt reaches a different member of the pool.
+// A later attempt can succeed after an earlier reply is rejected.
 TEST(NtpSynchronizer, ARejectionOnOneAttemptDoesNotEndTheCall) {
     FakeNtpTransport transport;
     transport.set_resolve_result(ResolveStatus::RESOLVED);
@@ -278,8 +251,8 @@ TEST(NtpSynchronizer, ADatagramFromElsewhereDoesNotEndTheAttempt) {
 TEST(NtpSynchronizer, ADatagramTooShortForAMessageDoesNotEndTheAttempt) {
     FakeNtpTransport transport;
     transport.set_resolve_result(ResolveStatus::RESOLVED);
-    // VR-7. From the server, but one byte short of a message: dropped, so the
-    // attempt is still waiting when the whole reply arrives.
+    // A short datagram leaves the attempt waiting for the complete reply
+    // (VR-7).
     std::vector<std::uint8_t> truncated = good_reply(transport.next_nonce());
     truncated.pop_back();
     transport.arrive_on_poll(1, FakeNtpTransport::address(1), truncated);
@@ -297,8 +270,7 @@ TEST(NtpSynchronizer, ADatagramTooShortForAMessageDoesNotEndTheAttempt) {
 TEST(NtpSynchronizer, AReplyToAnotherRequestIsDroppedNotCounted) {
     FakeNtpTransport transport;
     transport.set_resolve_result(ResolveStatus::RESOLVED);
-    // VR-7. A replay carrying someone else's nonce must not end an attempt
-    // that would otherwise have succeeded, so the good reply behind it wins.
+    // A replay must not end an attempt before its valid reply arrives (VR-7).
     transport.arrive_on_poll(1, FakeNtpTransport::address(1), good_reply(999));
     transport.arrive_on_poll(2, FakeNtpTransport::address(1),
                              good_reply(transport.next_nonce()));
@@ -310,9 +282,7 @@ TEST(NtpSynchronizer, AReplyToAnotherRequestIsDroppedNotCounted) {
     EXPECT_EQ(transport.send_calls(), 1U);
 }
 
-// ---------------------------------------------------------------------------
 // The slot pool. These are the cases the seam exists for.
-// ---------------------------------------------------------------------------
 
 TEST(NtpSynchronizer, ALookupThatNeverLandsHoldsItsSlot) {
     FakeNtpTransport transport;
@@ -324,8 +294,8 @@ TEST(NtpSynchronizer, ALookupThatNeverLandsHoldsItsSlot) {
 
     ASSERT_FALSE(result.ok());
     EXPECT_EQ(result.error(), NtpError::TIMED_OUT);
-    // Every attempt timed out inside resolution, so every slot was abandoned to
-    // a callback that has not fired. This is the state AR-6 describes.
+    // All attempts timed out during resolution, leaving their slots held
+    // (AR-6).
     EXPECT_EQ(sync.slots_in_use(), MAX_REQUEST_ATTEMPTS);
     EXPECT_TRUE(transport.resolution_outstanding());
 }
@@ -339,8 +309,8 @@ TEST(NtpSynchronizer, SlotExhaustionIsReportedAndIsRetryable) {
     ASSERT_FALSE(sync.synchronize(SHORT_TIMEOUT).ok());
     ASSERT_EQ(sync.slots_in_use(), MAX_REQUEST_ATTEMPTS);
 
-    // AR-6: the next call has no slot to claim. It must say so rather than
-    // report a network failure, and must not spend three attempts finding out.
+    // The next call must report slot exhaustion and must not spend three
+    // attempts (AR-6).
     const std::size_t opens = transport.open_calls();
     const auto result = sync.synchronize(SHORT_TIMEOUT);
 
@@ -351,11 +321,7 @@ TEST(NtpSynchronizer, SlotExhaustionIsReportedAndIsRetryable) {
     EXPECT_TRUE(retryable(result.error()));
 }
 
-// AR-6 promises NO_ATTEMPT_SLOT without network traffic and without spending
-// an attempt. A pool that still had a slot on entry cannot honour that promise
-// once it empties partway through: an endpoint has been opened and a lookup
-// issued, and what the caller needs is the diagnosis those produced rather
-// than a report about the pool.
+// Slot exhaustion after network activity returns the preceding error (AR-6).
 TEST(NtpSynchronizer, APoolEmptiedMidCallReportsTheAttemptNotThePool) {
     FakeNtpTransport transport;
     transport.set_resolve_result(ResolveStatus::IN_PROGRESS);
@@ -387,9 +353,7 @@ TEST(NtpSynchronizer, AnAbandonedLookupReleasesItsSlotWhenItLands) {
     ASSERT_FALSE(sync.synchronize(SHORT_TIMEOUT).ok());
     ASSERT_EQ(sync.slots_in_use(), MAX_REQUEST_ATTEMPTS);
 
-    // The lookup lwIP could not cancel finally fires, long after the attempt
-    // that started it was torn down. Whichever of the caller and the callback
-    // runs last releases the slot; here it is the callback.
+    // The late resolution callback releases the abandoned slot.
     for (std::size_t i = 0; i < MAX_REQUEST_ATTEMPTS; ++i) {
         transport.deliver_resolution(FakeNtpTransport::address(1));
     }
@@ -397,7 +361,7 @@ TEST(NtpSynchronizer, AnAbandonedLookupReleasesItsSlotWhenItLands) {
     EXPECT_EQ(sync.slots_in_use(), 0U);
     EXPECT_FALSE(transport.resolution_outstanding());
 
-    // And the pool is usable again, which is what makes AR-6 transient.
+    // Releasing the abandoned slot makes exhaustion transient (AR-6).
     transport.set_resolve_result(ResolveStatus::RESOLVED);
     transport.arrive_on_poll(transport.poll_calls() + 1,
                              FakeNtpTransport::address(1),
@@ -432,11 +396,9 @@ TEST(NtpSynchronizer, ALateResolutionDoesNotDisturbTheNextAttempt) {
 TEST(NtpSynchronizer, AResolutionLandingUnderTheLockIsSerialized) {
     FakeNtpTransport transport;
     transport.set_resolve_result(ResolveStatus::IN_PROGRESS);
-    // Land it inside resolve(), while run_attempt still holds the lock -- the
-    // one delivery point that reaches the queue, and the interleaving the lock
-    // is taken for. Firing it inline instead would set address_ready before
-    // the mainline sets resolve_pending, leaving a slot whose only callback
-    // has already run and which nothing is left to release.
+    // Queue the callback until unlock, after resolve_pending is set.
+    // Inline delivery would leave a slot waiting for a callback that already
+    // ran.
     transport.resolve_lands_under_the_lock(FakeNtpTransport::address(1));
     transport.arrive_on_poll(1, FakeNtpTransport::address(1),
                              good_reply(transport.next_nonce()));
@@ -470,11 +432,7 @@ TEST(NtpSynchronizer, EveryErrorHasADescription) {
     }
 }
 
-// The companion to the test above, over the same vocabulary. retryable() is
-// what docs/usage-guide.md tells a caller to branch on, so an enumerator
-// nobody classified is a caller giving up on a condition that was about to
-// clear. The expectations are written out rather than derived from the
-// predicate: a table that recomputes what it is checking asserts nothing.
+// Independent expectations cover every error classification.
 TEST(NtpSynchronizer, EveryErrorIsClassifiedForRetry) {
     struct Classification {
         NtpError error;
@@ -491,7 +449,7 @@ TEST(NtpSynchronizer, EveryErrorIsClassifiedForRetry) {
         {.error = NtpError::SOCKET_FAILED, .retryable = true},
         {.error = NtpError::SEND_FAILED, .retryable = true},
         {.error = NtpError::TIMED_OUT, .retryable = true},
-        // A server reporting its own state; it reports the same again.
+        // Reply rejections are non-retryable.
         {.error = NtpError::REJECTED_MODE, .retryable = false},
         {.error = NtpError::REJECTED_LEAP_ALARM, .retryable = false},
         {.error = NtpError::REJECTED_STRATUM, .retryable = false},

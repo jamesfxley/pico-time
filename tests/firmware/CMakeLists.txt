@@ -1,11 +1,5 @@
-# The README's and the usage guide's examples, compiled from the documents in
-# the cross tree (EN-03.5): they call the firmware-only entry points and log
-# through pico-logging, which only the firmware configure fetches. Each harness
-# in docs/ supplies only what its example leaves out, and the example is read
-# out of the document at configure time, so an API change that breaks one fails
-# this build. They are compiled and never linked, so they take time_sync's
-# headers rather than the library: linking it would compile lwIP and the SDK's
-# own sources into this target under this repository's strict flags.
+# Document examples are extracted at configure time and compile without linking.
+# Linking time_sync would compile SDK and lwIP sources under strict flags.
 house_cxx_add_doc_examples(pico_time_firmware_doc_examples PACKAGE pico_time
     GROUP firmware GROUPS firmware
     DOCUMENTS ${PROJECT_SOURCE_DIR}/README.md
@@ -15,8 +9,7 @@ house_cxx_add_doc_examples(pico_time_firmware_doc_examples PACKAGE pico_time
 target_include_directories(pico_time_firmware_doc_examples PRIVATE
     ${PROJECT_SOURCE_DIR}/src/time_sync/include)
 
-# AR-4: retain a POSIX setter call in a linked image so its map and symbols
-# expose whether the library or the SDK supplies settimeofday().
+# Retain the POSIX setter in the linked image for map and symbol checks (AR-4).
 add_executable(pico_time_settimeofday_probe settimeofday_probe.cpp)
 house_cxx_werror_sources(settimeofday_probe.cpp)
 # newlib exposes the BSD/POSIX setter declaration under __BSD_VISIBLE.

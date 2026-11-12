@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: MIT
-// The host-side half of the version pin.
-//
-// The advertised version and project(pico_time VERSION ...) are two records of
-// one fact. time_keeper.cpp static_asserts them against each other in the
-// firmware build; this does the same on the host, so the drift is caught by
-// whichever tree gets built first rather than only by the one that needs an
-// SDK.
+// Host tests check the header version against CMake.
 
 #include "pico_time/pico_time.hpp"
 
