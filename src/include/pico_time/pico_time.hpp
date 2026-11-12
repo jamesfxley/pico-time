@@ -2,26 +2,18 @@
 #pragma once
 
 /// \file pico_time.hpp
-/// pico-time umbrella header. Pulls in the full public surface, so a consumer
-/// can include this alone and synchronize the wall clock.
+/// The firmware API and version constants.
 
 // The umbrella re-exports the public surface.
 #include <pico_time/time_sync/time_sync.hpp>  // IWYU pragma: export
 
 namespace pico_time {
 
-/// Semantic version of the library, mirroring project(pico_time VERSION ...) in
-/// the root CMakeLists.txt. Pinned from both sides:
-/// tests/core/pico_time_test.cpp checks these on the host, and time_keeper.cpp
-/// static_asserts them against the version CMake passes in, so the two cannot
-/// drift apart. Major version. While it is 0 the interface is not yet stable
-/// and the minor version carries breaks (EN-06.1).
+/// Major version.
 inline constexpr int VERSION_MAJOR = 0;
-/// Minor version. While the major version is 0, changes when a documented
-/// interface breaks.
+/// Minor version.
 inline constexpr int VERSION_MINOR = 2;
-/// Patch version. While the major version is 0, changes for every other
-/// release.
+/// Patch version.
 inline constexpr int VERSION_PATCH = 0;
 
 }  // namespace pico_time

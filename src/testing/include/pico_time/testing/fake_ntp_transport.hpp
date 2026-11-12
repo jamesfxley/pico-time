@@ -10,32 +10,10 @@
 #include <vector>
 
 /// \file fake_ntp_transport.hpp
-/// A scripted INtpTransport, for testing an NTP policy without a network.
-///
-/// Shipped rather than kept under tests/: a downstream project driving
-/// NtpSynchronizer in its own tests needs the same double this repository's
-/// tests use, and a copy in each tree is a copy free to drift from the contract
-/// it stands in for (EN-04.1).
-///
-/// The contract this fake honours, and the reason it exists:
-///
-///   * `resolve()` returning IN_PROGRESS **cannot be cancelled**. The callback
-///     fires exactly once, whenever the script says, including after the
-///     attempt that started it has been torn down. That is the case the slot
-///     pool exists for, and the one no run on hardware can induce.
-///   * A callback runs **only while the lock is not held**, which is what the
-///     real transport's cyw43_arch_lwip_begin/end guarantees and what the slot
-///     protocol's correctness rests on. A resolution delivered under the lock
-///     is queued and fires at unlock, exactly as lwIP would.
-///   * A datagram arrives **from inside the poll loop**, which is a
-///     simplification and not what the target does. This library links
-///     pico_cyw43_arch_lwip_threadsafe_background, whose async context has no
-///     poll function, so poll() is a no-op on target and lwIP delivers from a
-///     background IRQ -- in practice during the sleep in wait(), and in
-///     principle at any instruction. Arrivals are scripted by poll index
-///     because that is what a synchronous fake can express; it is a subset of
-///     the target's orders, not the whole of them, and no test written here
-///     can place a callback inside the policy's own poll loop.
+/// A scripted INtpTransport for tests without a network.
+/// Uncancellable resolutions fire once and queue until unlock when locked.
+/// Datagrams arrive only during poll(), a subset of the target IRQ
+/// interleavings.
 
 namespace pico_time::testing {
 
@@ -44,18 +22,14 @@ class FakeNtpTransport final : public INtpTransport {
    public:
     FakeNtpTransport() = default;
 
-    /// A test double is constructed on the stack of the test that owns it and
-    /// is never copied: it is registered with the policy by reference, so a
-    /// copy would be scripted and observed independently of the one in use.
+    /// Non-copyable because policy registration stores a reference.
     FakeNtpTransport(const FakeNtpTransport&) = delete;
     FakeNtpTransport& operator=(const FakeNtpTransport&) = delete;
     FakeNtpTransport(FakeNtpTransport&&) = delete;
     FakeNtpTransport& operator=(FakeNtpTransport&&) = delete;
     ~FakeNtpTransport() = default;
 
-    /// An address the scripted resolution reports. Any distinct tag will do:
-    /// the policy does not interpret one, it only compares sender against
-    /// server, so two tags differ exactly when two endpoints do.
+    /// An address whose tag distinguishes an endpoint.
     [[nodiscard]] static NtpAddress address(std::uint8_t tag) {
         NtpAddress out;
         out.opaque[0] = tag;
@@ -74,24 +48,15 @@ class FakeNtpTransport final : public INtpTransport {
     /// \param ok what every subsequent send() returns.
     void set_send_result(bool ok) { send_result_ = ok; }
 
-    /// Land the lookup inside resolve(), while the policy still holds the
-    /// lock.
-    ///
-    /// The one interleaving the slot protocol is built for, and the only way
-    /// to reach the queue: every other delivery point in this fake runs at
-    /// depth zero. lwIP can call back from inside the call that starts the
-    /// lookup, and the policy's correctness rests on that callback being
-    /// serialized behind the unlock rather than running inside it.
-    ///
-    /// \param resolved the address that resolution reports.
+    /// Queue resolution during resolve(), while the caller holds the lock.
+    /// \param resolved the address delivered at unlock.
     void resolve_lands_under_the_lock(const NtpAddress& resolved) {
         resolve_inline_ = true;
         resolve_address_ = resolved;
     }
 
-    /// \param at_poll the poll index an outstanding resolution lands on,
-    ///        counting from one; zero leaves it outstanding forever, which is
-    ///        the state the slot pool exists to survive.
+    /// \param at_poll the one-based poll index. Zero leaves the lookup
+    /// outstanding.
     /// \param resolved the address that resolution reports.
     void resolve_on_poll(std::size_t at_poll, const NtpAddress& resolved) {
         resolve_at_poll_ = at_poll;
@@ -104,22 +69,14 @@ class FakeNtpTransport final : public INtpTransport {
         arrivals_.push_back({at_poll, sender, std::move(datagram)});
     }
 
-    /// \param value the next nonce; it increments after each nonce() call, so
-    ///        two attempts never share one, as the real source does not.
+    /// \param value the next nonce, incremented on each nonce() call.
     void set_next_nonce(std::uint64_t value) { next_nonce_ = value; }
 
     /// \param value the instant now_ms() reports until the next wait().
     void set_now(std::uint64_t value) { now_ = value; }
 
-    /// Report time from a 32-bit counter rather than the 64-bit one the seam
-    /// declares.
-    ///
-    /// This is the width the SDK's to_ms_since_boot() actually has, so a fake
-    /// that only ever counts up in 64 bits is a more capable clock than the
-    /// thing it stands in for -- and no test written against it can reach the
-    /// wrap a real attempt has to survive (CXX-08.6).
-    ///
-    /// \param narrow whether now_ms() truncates to 32 bits.
+    /// Truncate now_ms() to 32 bits to test counter wrap.
+    /// \param narrow whether truncation is enabled.
     void set_narrow_clock(bool narrow) { narrow_clock_ = narrow; }
 
     // -- Observation -------------------------------------------------------
@@ -163,11 +120,8 @@ class FakeNtpTransport final : public INtpTransport {
 
     // -- Driving -----------------------------------------------------------
 
-    /// Fire the oldest outstanding resolution callback.
-    ///
-    /// Under the lock this is queued and fires at unlock, which is what lwIP
-    /// does; outside it, it fires now. Does nothing when no lookup is
-    /// outstanding, so a test can call it unconditionally.
+    /// Deliver the oldest resolution, queuing until unlock if locked.
+    /// Does nothing when no lookup is outstanding.
     void deliver_resolution(const NtpAddress& resolved) {
         if (observers_.empty()) {
             return;
@@ -256,11 +210,8 @@ class FakeNtpTransport final : public INtpTransport {
     }
 
     void wait(std::chrono::milliseconds duration) override {
-        // Recorded up to a ceiling. A poll loop that never ends is exactly the
-        // policy defect a fake has to survive being on the wrong side of, and
-        // an unbounded record turns one into an unbounded allocation -- a dead
-        // host rather than a failing test. No terminating attempt comes near
-        // the cap, so nothing a passing test asserts is truncated.
+        // Recorded waits are capped so a non-terminating poll loop cannot
+        // exhaust memory. Terminating attempts do not reach the cap.
         if (waits_.size() < MAX_RECORDED_WAITS) {
             waits_.push_back(duration);
         }

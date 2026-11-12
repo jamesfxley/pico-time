@@ -1,11 +1,4 @@
 // SPDX-License-Identifier: MIT
-// synchronize_ntp(): wire the lwIP transport to the portable attempt loop, and
-// apply what it returns.
-//
-// The decisions -- how many attempts, which datagrams to trust, when an
-// abandoned lookup's slot may be reused -- belong to
-// pico_time::NtpSynchronizer, above the transport seam and host-tested. What is
-// here is the composition and the log lines, which need the target.
 
 #include <array>
 #include <chrono>
@@ -22,20 +15,15 @@
 namespace pico_time {
 namespace {
 
-// A const char* rather than a string_view: its only use is the lwIP DNS call
-// below the seam, which requires NUL termination that a view cannot promise.
+// The DNS API needs a NUL-terminated name.
 constexpr const char* NTP_SERVER = "pool.ntp.org";
 constexpr std::size_t TIME_STRING_SIZE = 20;  // "YYYY-MM-DD HH:MM:SS" + NUL
 
 void log_synchronized(const SynchronizedTime& sample) {
     const auto epoch_seconds = static_cast<time_t>(sample.epoch_seconds);
 
-    // A failed conversion leaves utc zeroed, which strftime renders as a
-    // plausible 1900 date. The log line is cosmetic -- the clock has already
-    // been set -- so say so explicitly rather than print a wrong time.
-    //
-    // strftime into a buffer rather than streaming std::put_time: LogLine has
-    // no inserter for the put_time proxy and would render it as "<?>".
+    // Failed conversion leaves a zeroed tm that would render as a 1900 date.
+    // LogLine cannot format the std::put_time proxy.
     struct tm utc{};
     std::array<char, TIME_STRING_SIZE> formatted{};
     if (gmtime_r(&epoch_seconds, &utc) == nullptr ||
@@ -61,11 +49,9 @@ pico_util::Result<void, NtpError> synchronize_ntp(
         return {};
     }
 
-    // Static, not a local: the slot pool inside it must outlive this call. A
-    // lookup lwIP could not cancel fires after the call that started it has
-    // returned, and the slot it writes into has to still be there (AR-6).
-    // The transport is constinit. The synchronizer is initialized on first
-    // mainline use, before callbacks can reach its state.
+    // The slot pool must outlive this call for uncancellable DNS callbacks
+    // (AR-6). The synchronizer initialises on first mainline use, before any
+    // callback.
     static constinit LwipNtpTransport transport{};
     static NtpSynchronizer synchronizer{transport, NTP_SERVER};
 

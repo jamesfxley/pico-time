@@ -1,14 +1,6 @@
 // SPDX-License-Identifier: MIT
-// The newlib syscall shims that expose the wall clock.
-//
-// _gettimeofday and settimeofday override the Pico SDK's weak definitions, so
-// std::chrono::system_clock, time(), and gettimeofday() read the same clock
-// that settimeofday() writes. _settimeofday shares the validated setter.
-//
-// The clock itself -- the offset, its publication protocol and the arithmetic
-// -- lives in wall_clock.hpp, which has no SDK dependency and is host-tested.
-// What is left here is the part that genuinely needs the target: reading the
-// SDK's monotonic counter, and the ABI-mandated syscall names.
+// Newlib hooks override the SDK clock. Portable arithmetic is in
+// wall_clock.hpp.
 
 #include <hardware/timer.h>
 #include <sys/time.h>
@@ -24,8 +16,6 @@
 #include "pico_time/pico_time.hpp"
 #include "wall_clock.hpp"
 
-// The advertised version and project(pico_time VERSION ...) are two records of
-// one fact. Bumping either alone stops the build here.
 static_assert(pico_time::VERSION_MAJOR == PICO_TIME_CMAKE_VERSION_MAJOR);
 static_assert(pico_time::VERSION_MINOR == PICO_TIME_CMAKE_VERSION_MINOR);
 static_assert(pico_time::VERSION_PATCH == PICO_TIME_CMAKE_VERSION_PATCH);
@@ -40,10 +30,10 @@ std::int64_t monotonic_time_us() {
 
 }  // namespace
 
-// Before the first synchronization this reports time since boot; afterwards,
-// Unix epoch time.
-// Same two reasons as _settimeofday below: an ABI-mandated name, and timeval
-// reached through the POSIX <sys/time.h> rather than a newlib internal.
+// Before synchronisation, _gettimeofday reports time since boot.
+// Afterwards, it reports Unix time.
+// readability-identifier-naming: the syscall name is fixed by the ABI.
+// misc-include-cleaner: timeval uses POSIX sys/time.h, not a newlib internal.
 // NOLINTNEXTLINE(readability-identifier-naming,misc-include-cleaner)
 extern "C" int _gettimeofday(struct timeval* tv, void* tz) {
     (void)tz;
@@ -56,11 +46,8 @@ extern "C" int _gettimeofday(struct timeval* tv, void* tz) {
     if (clock.synchronized()) {
         const auto offset = clock.load();
         if (!offset.ok()) {
-            // The offset could not be validated, which happens only when a
-            // writer breaks the wall clock's contract. Reported rather than
-            // answered with a possibly torn time: newlib's time() turns a
-            // negative return into (time_t)-1, the standard failure value, and
-            // EAGAIN says a later call may succeed.
+            // newlib time() maps a negative return to (time_t)-1. EAGAIN says a
+            // later read can succeed.
             errno = EAGAIN;
             return -1;
         }
@@ -68,18 +55,16 @@ extern "C" int _gettimeofday(struct timeval* tv, void* tz) {
     }
 
     tv->tv_sec = adjusted / MICROSECONDS_PER_SECOND;
-    // suseconds_t reached through the POSIX <sys/time.h>; include-cleaner
-    // names a newlib internal header instead. The cast is not redundant --
-    // suseconds_t is narrower than int64_t on this target.
+    // The cast narrows to suseconds_t on this target.
+    // misc-include-cleaner: POSIX sys/time.h supplies suseconds_t.
     // NOLINTNEXTLINE(misc-include-cleaner)
     tv->tv_usec = static_cast<suseconds_t>(adjusted % MICROSECONDS_PER_SECOND);
     return 0;
 }
 
-// Preserve the existing C entry point, including its leading underscore.
-// struct timeval comes from <sys/time.h>, the POSIX-mandated header;
-// include-cleaner names newlib's sys/_timeval.h, an implementation header no
-// portable source should include.
+// readability-identifier-naming: the syscall name is fixed by the ABI.
+// misc-include-cleaner names newlib sys/_timeval.h, an implementation header
+// no portable source should include. POSIX supplies timeval through sys/time.h.
 // NOLINTNEXTLINE(readability-identifier-naming,misc-include-cleaner)
 extern "C" int _settimeofday(const struct timeval* tv,
                              const struct timezone* tz) {
@@ -89,13 +74,8 @@ extern "C" int _settimeofday(const struct timeval* tv,
         return -1;
     }
 
-    // Validated exactly as apply_wall_clock_time(), and for the same reason:
-    // an unchecked tv_usec silently skewed the clock by whole seconds, and a
-    // negative tv_sec latched it at the epoch with no way back short of a
-    // reboot (AR-4). POSIX specifies EINVAL for a tv_usec out of range.
-    // std::cmp_greater rather than a cast: tv_usec is signed and the bound is
-    // unsigned, and a cast to silence that is the very pattern that hides a
-    // negative value behind a large positive one.
+    // Negative fields are rejected before unsigned conversion (AR-4).
+    // cmp_greater compares signed tv_usec to the unsigned bound without a cast.
     if (tv->tv_sec < 0 || tv->tv_usec < 0 ||
         std::cmp_greater(tv->tv_usec, pico_time::MAX_MICROSECONDS)) {
         errno = EINVAL;
@@ -111,11 +91,8 @@ extern "C" int _settimeofday(const struct timeval* tv,
     return 0;
 }
 
-// Match newlib sys/time.h:423: int settimeofday(const struct timeval *,
-//                                            const struct timezone *);
-// The SDK's weak settimeofday writes its private offset rather than calling
-// _settimeofday (pico_clib_interface/newlib_interface.c:91). Keep the syscall
-// entry point above for direct callers; both names use its AR-4 validation.
+// The SDK weak setter writes its own offset. This override shares
+// _settimeofday validation (AR-4).
 extern "C" int settimeofday(const struct timeval* tv,
                             const struct timezone* tz) {
     return _settimeofday(tv, tz);
@@ -127,11 +104,7 @@ bool is_time_synchronized() { return wall_clock().synchronized(); }
 
 pico_util::Result<void, WallClockError> apply_wall_clock_time(
     std::uint64_t epoch_seconds, std::uint32_t epoch_microseconds) {
-    // The two bounds are checked here as well as inside compute_epoch_offset()
-    // so the caller is told which one it broke. The offset function returns a
-    // single nullopt by design -- it has one job and one answer -- and a caller
-    // that passed microseconds-since-epoch into the seconds argument cannot
-    // find that mistake from a bare failure (AR-3).
+    // Separate checks identify which bound failed (AR-3).
     if (epoch_microseconds > MAX_MICROSECONDS) {
         return WallClockError::MICROSECONDS_INVALID;
     }
@@ -143,8 +116,8 @@ pico_util::Result<void, WallClockError> apply_wall_clock_time(
     const std::optional<std::int64_t> offset = compute_epoch_offset(
         epoch_seconds, epoch_microseconds, monotonic_time_us());
     if (!offset.has_value()) {
-        // Unreachable while the two checks above mirror the offset function's
-        // own. Kept because "unreachable" is a claim about another file.
+        // Defensive check in case compute_epoch_offset() gains another failure
+        // path.
         return WallClockError::EPOCH_OUT_OF_RANGE;
     }
 

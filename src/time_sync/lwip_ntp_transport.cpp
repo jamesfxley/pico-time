@@ -1,7 +1,4 @@
 // SPDX-License-Identifier: MIT
-// lwIP glue and nothing else. Every decision about what to do with a datagram,
-// how many attempts to make and when a slot may be reused lives above the seam
-// in pico_time::NtpSynchronizer, where a host test can drive it.
 
 #include "lwip_ntp_transport.hpp"
 
@@ -10,9 +7,7 @@ extern "C" {
 #include <lwip/dns.h>
 #include <lwip/err.h>
 #include <lwip/ip_addr.h>
-// opt.h supplies the lwIP option macros the static_assert below checks. The
-// pragma is load-bearing: include-cleaner does not count a macro expansion as a
-// use, so it reports this include as unused.
+// misc-include-cleaner does not attribute option macros to opt.h.
 #include <lwip/opt.h>  // IWYU pragma: keep
 #include <lwip/pbuf.h>
 #include <lwip/udp.h>
@@ -35,17 +30,9 @@ extern "C" {
 namespace pico_time {
 namespace {
 
-// NO_SYS is the lwIP option this file's correctness actually rests on: it
-// decides whether the stack runs from the cyw43 background context under
-// cyw43_arch_lwip_begin/end, which is the locking model lock()/unlock() and
-// every callback here assume. UDP, DNS and IPv4 are not asserted because their
-// absence is already a compile or link failure, whereas NO_SYS=0 builds and is
-// wrong.
-//
-// Tested against zero rather than one so the assertion survives preprocessing
-// as a comparison rather than as the tautology `1 == 1`, which analysis reports
-// as a redundant expression. include-cleaner does not count a macro expansion
-// as a use of its header, so it sees no header providing this.
+// NO_SYS selects the callback locking model this adapter assumes.
+// Comparing against zero avoids a preprocessed 1 == 1 tautology.
+// misc-include-cleaner does not attribute the macro to its header.
 // NOLINTNEXTLINE(misc-include-cleaner)
 static_assert(NO_SYS != 0,
               "pico-time requires the NO_SYS lwIP configuration: its callbacks "
@@ -70,10 +57,8 @@ static_assert(sizeof(ip_addr_t) <= sizeof(NtpAddress::opaque),
               "NtpAddress::opaque is too small for this lwIP configuration's "
               "ip_addr_t; widen it in ntp_transport.hpp");
 
-// std::memcpy rather than a cast through unsigned char*: ip_addr_t is
-// trivially copyable, and memcpy between two such objects is the one blessed
-// way to reinterpret storage without the cast the guideline refuses
-// (CXX-03). std::bit_cast does not apply -- the two types differ in size.
+// The opaque array and ip_addr_t can differ in size, so bit_cast does not
+// apply.
 [[nodiscard]] NtpAddress to_opaque(const ip_addr_t& address) {
     NtpAddress out;
     std::memcpy(out.opaque.data(), &address, sizeof(ip_addr_t));
@@ -93,9 +78,8 @@ void on_dns_resolved(const char* /*hostname*/, const ip_addr_t* address,
     if (observer == nullptr) {
         return;
     }
-    // Runs in the lwIP callback context, holding the lock. Records and returns:
-    // the request is sent by the mainline once it observes the address, so no
-    // allocation or lock acquisition happens here (VR-8).
+    // The callback records under the lock. The mainline sends the request
+    // (VR-8).
     observer->on_resolved(address == nullptr ? NtpAddress{}
                                              : to_opaque(*address));
 }
@@ -112,8 +96,7 @@ ResolveStatus LwipNtpTransport::resolve(const char* host, NtpAddress& address,
     const err_t result =
         dns_gethostbyname(host, &resolved, on_dns_resolved, &observer);
     if (result == ERR_OK) {
-        // Answered from the cache: the address is already in place and no
-        // callback will fire.
+        // A cached result schedules no callback.
         address = to_opaque(resolved);
         return ResolveStatus::RESOLVED;
     }
@@ -143,9 +126,8 @@ bool LwipNtpTransport::open(IDatagramObserver& observer) {
                     pbuf_free(packet);
                     return;
                 }
-                // Copied out before the pbuf is released, because the span
-                // handed to the observer must not outlive this call and lwIP
-                // requires the callback to free the buffer.
+                // The pbuf is copied before release. The observer span must not
+                // outlive this call.
                 std::array<std::uint8_t, 64> raw{};
                 const u16_t copied =
                     pbuf_copy_partial(packet, raw.data(),
@@ -166,9 +148,8 @@ bool LwipNtpTransport::open(IDatagramObserver& observer) {
 void LwipNtpTransport::close() {
     cyw43_arch_lwip_begin();
     if (pcb_ != nullptr) {
-        // Disarm before the caller reads anything the callback wrote. A second
-        // datagram could otherwise overwrite the timestamp halves while the
-        // caller reads them (CXX-08.1).
+        // Disarm before the caller reads the sample to prevent another datagram
+        // overwriting its timestamp halves.
         udp_recv(pcb_, nullptr, nullptr);
         udp_remove(pcb_);
         pcb_ = nullptr;
@@ -189,9 +170,8 @@ bool LwipNtpTransport::send(const NtpAddress& server,
         return false;
     }
 
-    // The pbuf was allocated at exactly this size, so the copy cannot be short;
-    // checking anyway keeps the failure a status rather than a half-filled
-    // request that reads as a valid one on the wire.
+    // A copy failure returns false before a partially filled request can be
+    // sent.
     err_t err =
         pbuf_take(buffer, payload.data(), static_cast<u16_t>(payload.size()));
     if (err == ERR_OK) {
@@ -205,11 +185,8 @@ bool LwipNtpTransport::send(const NtpAddress& server,
 void LwipNtpTransport::poll() { cyw43_arch_poll(); }
 
 std::uint64_t LwipNtpTransport::now_ms() const {
-    // From the microsecond counter rather than to_ms_since_boot(), which
-    // returns uint32_t and so returns to zero every 49.7 days. The seam
-    // declares this monotonic, and a policy is entitled to hold the value
-    // across a wait; a counter that steps back under it is a hang, not a
-    // late timeout (CXX-08.6).
+    // The 64-bit microsecond source avoids the 49.7-day wrap of
+    // to_ms_since_boot().
     return to_us_since_boot(get_absolute_time()) / US_PER_MS;
 }
 

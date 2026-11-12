@@ -8,43 +8,15 @@
 #include <span>
 
 /// \file ntp_transport.hpp
-/// The environment an NTP exchange needs, as one interface (EN-04.1).
-///
-/// Everything on the far side of this seam is lwIP and the Pico SDK: name
-/// resolution, a UDP endpoint, the monotonic clock, the background poll and the
-/// lock those callbacks run under. Everything on the near side -- the attempt
-/// loop, the slot pool that outlives an uncancellable lookup, and the decision
-/// about what a failed attempt means -- is policy, and is host-tested against a
-/// fake.
-///
-/// The split is drawn here and not lower because the slot pool exists *because*
-/// of a property of this interface: resolve() cannot be cancelled, so a lookup
-/// fires after the attempt that started it has been torn down. That protocol is
-/// the subtlest thing in this library and it belongs where a test can drive it.
-///
-/// Requirement IDs cited here are defined in docs/technical-specification.md.
+/// Network, timing and locking operations used by the NTP attempt loop.
 
 namespace pico_time {
 
-/// Bytes an address occupies. Large enough for an lwIP ip_addr_t in its
-/// dual-stack configuration; the adapter static_asserts it against the real
-/// type, which is the only place the two spellings meet.
+/// Capacity of the transport address representation, in bytes.
 inline constexpr std::size_t NTP_ADDRESS_BYTES = 20;
 
-/// A resolved server address, opaque to the policy above the seam.
-///
-/// The policy does not interpret one: it receives an address from resolve()
-/// and hands the same value back to send(). Holding it as an
-/// implementation-defined blob keeps ip_addr_t -- and so lwIP -- out of every
-/// header the policy includes, which is what lets that policy compile on a
-/// host at all.
-///
-/// It does compare two for equality, to tell a reply from the server it asked
-/// from a stray datagram. A transport must therefore write the same bytes for
-/// the same endpoint on both the resolve and the receive path, padding
-/// included; the adapter's size assert is what holds that, because the lwIP
-/// configuration whose representation stops being canonical is also the one
-/// too large to fit.
+/// Resolve and receive paths must use identical bytes for equal endpoints,
+/// including padding. The address is opaque to the attempt loop.
 struct NtpAddress {
     /// The address, in the transport's own representation.
     alignas(std::uint32_t) std::array<std::uint8_t, NTP_ADDRESS_BYTES> opaque{};
@@ -55,27 +27,22 @@ struct NtpAddress {
 
 /// What a resolution request did.
 enum class ResolveStatus : std::uint8_t {
-    /// Answered immediately, from cache. The address is written and no
-    /// callback will fire.
+    /// The address is available immediately. No callback will fire.
     RESOLVED,
-    /// The observer will be called back exactly once, and cannot be cancelled.
-    /// This is the case the slot pool exists for.
+    /// The observer will be called exactly once. The lookup cannot be
+    /// cancelled.
     IN_PROGRESS,
-    /// The query was refused. No callback will fire.
+    /// The query failed. No callback will fire.
     FAILED,
 };
 
-/// Notified when a resolution started with IN_PROGRESS lands.
-///
-/// Called in the transport's callback context, holding the transport's lock.
-/// An implementation stores and returns (VR-8).
+/// Receives resolution results in callback context, holding the transport lock.
+/// An implementation records the result and returns (VR-8).
 class IResolveObserver {
    public:
     IResolveObserver() = default;
 
-    /// An interface is never copied: assigning one implementation to another
-    /// through this type would slice it. The destructor below is protected and
-    /// non-virtual on purpose -- see there.
+    /// Non-copyable and non-movable to prevent interface slicing.
     IResolveObserver(const IResolveObserver&) = delete;
     IResolveObserver& operator=(const IResolveObserver&) = delete;
     IResolveObserver(IResolveObserver&&) = delete;
@@ -85,9 +52,7 @@ class IResolveObserver {
     virtual void on_resolved(const NtpAddress& address) = 0;
 
    protected:
-    // Not deleted through this interface: an observer is a member of the
-    // attempt slot that owns it, so a virtual destructor would buy nothing and
-    // cost a vtable entry (CXX-05.7).
+    // The owning attempt slot destroys its observer directly.
     ~IResolveObserver() = default;
 };
 
@@ -96,9 +61,7 @@ class IDatagramObserver {
    public:
     IDatagramObserver() = default;
 
-    /// An interface is never copied: assigning one implementation to another
-    /// through this type would slice it. The destructor below is protected and
-    /// non-virtual on purpose -- see there.
+    /// Non-copyable and non-movable to prevent interface slicing.
     IDatagramObserver(const IDatagramObserver&) = delete;
     IDatagramObserver& operator=(const IDatagramObserver&) = delete;
     IDatagramObserver(IDatagramObserver&&) = delete;
@@ -113,25 +76,19 @@ class IDatagramObserver {
     ~IDatagramObserver() = default;
 };
 
-/// The seam. One implementation over lwIP, one fake.
+/// Operations implemented by the lwIP adapter and the test transport.
 class INtpTransport {
    public:
     INtpTransport() = default;
 
-    /// An interface is never copied: assigning one implementation to another
-    /// through this type would slice it. The destructor below is protected and
-    /// non-virtual on purpose -- see there.
+    /// Non-copyable and non-movable to prevent interface slicing.
     INtpTransport(const INtpTransport&) = delete;
     INtpTransport& operator=(const INtpTransport&) = delete;
     INtpTransport(INtpTransport&&) = delete;
     INtpTransport& operator=(INtpTransport&&) = delete;
 
-    /// Hold while touching state a callback also touches.
-    ///
-    /// On the real transport this is cyw43_arch_lwip_begin/end. It is on the
-    /// interface rather than hidden inside it because the slot protocol's
-    /// correctness rests on it: claiming and releasing a slot is serialized
-    /// against the resolution callback by this lock and by nothing else.
+    /// Hold while accessing callback state to serialise slot claims and
+    /// releases.
     virtual void lock() = 0;
     /// Release the lock taken by lock().
     virtual void unlock() = 0;
@@ -169,9 +126,8 @@ class INtpTransport {
     [[nodiscard]] virtual std::uint64_t nonce() = 0;
 
    protected:
-    // Protected and non-virtual: a transport is owned by whoever constructed
-    // it, never deleted through this interface, and this makes that a compile
-    // error rather than a convention (CXX-05.7).
+    // The constructor caller owns the transport.
+    // Deletion through this type does not compile.
     ~INtpTransport() = default;
 };
 

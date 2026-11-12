@@ -1,8 +1,4 @@
-# The NTP client's policy: the attempt loop and the slot pool an uncancellable
-# lookup outlives. No lwIP and no Pico SDK -- everything reaches the network
-# through INtpTransport -- which is what lets AR-6's slot exhaustion and the
-# abandoned-slot release protocol be driven by a host test. Built in both trees;
-# the firmware library links it.
+# Host tests drive slot exhaustion and abandoned lookup release (AR-6).
 add_library(pico_time_ntp STATIC
     ntp_synchronizer.cpp
 )
@@ -17,11 +13,8 @@ target_sources(pico_time_ntp PUBLIC
         include/pico_time/ntp/ntp_synchronizer.hpp
 )
 
-# core's ntp_message.hpp is its implementation detail: in no FILE_SET, never
-# installed. This module parses replies with it, so it names core's source
-# directory PRIVATE -- the same relationship time_sync has, and deliberately not
-# core exporting it, which would make the header reachable in-tree and absent
-# from the installed package.
+# PRIVATE keeps these headers off the public build interface. The installed
+# package lacks them, so code that compiles in-tree would fail downstream.
 target_include_directories(pico_time_ntp
     PRIVATE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../core>
@@ -32,9 +25,7 @@ target_include_directories(pico_time_ntp
 
 target_compile_features(pico_time_ntp PUBLIC cxx_std_20)
 
-# pico_util::core is PUBLIC: synchronize() returns a pico_util::Result, so a
-# consumer of ntp_synchronizer.hpp needs that header. core is PUBLIC for the
-# epoch header the sample types are stated against.
+# Public headers expose Result and the epoch bounds, so their targets propagate.
 target_link_libraries(pico_time_ntp
     PUBLIC
         pico_time::core
