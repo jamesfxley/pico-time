@@ -1,43 +1,40 @@
-# pico-time Technical Specification
+# pico-time technical specification
 
-Normative. This document defines what the library guarantees; the code and
-tests cite these IDs, and a guarantee that is not here is not a guarantee.
-
-Engineering rules are cited by ID (`EN-`/`CXX-`) and resolve at
-`infra/house/standard/`.
+This document owns the library's guarantees. Code and tests cite its
+requirement IDs. `EN-` and `CXX-` rules resolve at `infra/house/standard/`.
 
 ## 1. Scope and targets
 
-A wall clock for the Raspberry Pi Pico 2 W: an SNTP client over the
-lwIP raw API, and the newlib syscall shims that put its result behind
-`std::chrono::system_clock`, `time()` and `gettimeofday()`.
+The library provides an SNTP wall clock for the Raspberry Pi Pico 2 W over the
+lwIP raw API. Newlib hooks expose it through `std::chrono::system_clock`,
+`time()` and `gettimeofday()`.
 
 | | |
 |---|---|
 | In scope | SNTP over IPv4/UDP; DNS resolution of one pool hostname; validation of server replies; a monotonic-offset wall clock readable from interrupt context |
 | Out of scope | NTP server mode; symmetric or broadcast association modes; NTS or any authenticated NTP; clock disciplining (the offset is stepped, never slewed); leap-second scheduling; timezones and local time |
 
-The board has no battery-backed RTC. Every guarantee below is about an offset
-from the SDK's monotonic counter, not about a clock that survives power loss.
+Guarantees concern an offset from the SDK's monotonic counter. The board has no
+battery-backed RTC, and the clock does not survive power loss.
 
 ## 2. Functional requirements (FR) — clock behaviour
 
 **FR-1.** The wall clock is a signed microsecond offset added to the SDK's
-monotonic counter. Synchronizing stores the offset; a read adds it back.
+monotonic counter. Synchronising stores the offset. A read adds it back.
 
-**FR-2.** Before the first synchronization, clock reads report time elapsed
+**FR-2.** Before the first synchronisation, clock reads report time elapsed
 since boot rather than an epoch time.
 
 **FR-3.** A clock read never yields a negative time. The result is clamped at
 the Unix epoch.
 
-**FR-4.** Synchronization state latches. `is_time_synchronized()` becomes true
+**FR-4.** Synchronisation state latches. `is_time_synchronized()` becomes true
 on the first successful set and never becomes false again.
 
 **FR-5.** A wall-clock time is accepted only when its seconds fall inside
 `[MIN_EPOCH_SECONDS, MAX_EPOCH_SECONDS)` and its microseconds do not exceed
-999999. A time outside those bounds is refused, and refusing leaves both the
-offset and the synchronization state unchanged.
+999999. A time outside those bounds is rejected, and rejecting leaves both the
+offset and the synchronisation state unchanged.
 
 **FR-6.** The offset is published so that a reader in any execution context,
 including an interrupt handler, obtains a value that was stored as a whole and
@@ -59,7 +56,7 @@ The condition is therefore the WRITER CONTRACT in `wall_clock.hpp` — one
 writer, mainline context only, at most one store per second — and it is a
 statement about the writer, not a caveat on the reader. It holds by
 construction only for `synchronize_ntp()`, which stores once, on success, and
-then returns before any work once the clock is synchronized (NR-4), so stores
+then returns before any work once the clock is synchronised (NR-4), so stores
 at most once per boot. `apply_wall_clock_time()`, `settimeofday()` and
 `_settimeofday()` reach the same store with no rate limit, from whatever context
 their caller runs in, so for these entry points the contract is an obligation
@@ -67,27 +64,27 @@ on the caller. Nothing enforces it, and no test covers its breach.
 
 Device coverage is statistical: `irq-clock-read-survives-mainline-set` samples
 interrupt reads in windows around mainline stores and requires whole permitted
-values. It does not establish preemption inside a store. Preemption coverage for
-the same `pico_util::Published<…, SLOT_RING_READER_MAY_PREEMPT>` primitive used
-by `wall_clock.hpp` belongs to pico-util:CR-3's device case
+values. It does not establish pre-emption inside a store. Preemption coverage
+for the same `pico_util::Published<…, SLOT_RING_READER_MAY_PREEMPT>` primitive
+used by `wall_clock.hpp` belongs to pico-util:CR-3's device case
 `slot-ring-irq-reader-publishes-whole-values` at pico-util `b9a1a1f`, with
 statistical coverage. pico-util's `src/publish/` is identical at `b9a1a1f` and
 at the pinned `2afe315`, so that case covers the primitive this library builds.
 
-**FR-7.** Between two synchronizations the clock is monotonic: it advances with
-the SDK counter and does not step. A synchronization may step it in either
+**FR-7.** Between two synchronisations the clock is monotonic: it advances with
+the SDK counter and does not step. A synchronisation may step it in either
 direction.
 
-**FR-8.** The width of FR-5's window is normative, not incidental. It is
+**FR-8.** The width of FR-5's window is normative. It is
 `EPOCH_WINDOW_SECONDS`, ten Julian years above the floor, and it is narrower
 than an NTP era. Two things rest on that. It bounds how far a forged or
-malfunctioning server can move the clock, so a window wide enough to admit
-anything the wire can express is no check at all. And it is what makes the era
+malfunctioning server can move the clock. A window that admits every wire value
+cannot reject an implausible time. And it is what makes the era
 choice of NR-5 decidable without a clock the client does not yet have.
 
-A build whose floor is 2025-01-01 therefore refuses every time from
+A build whose floor is 2025-01-01 therefore rejects every time from
 2035-01-01T12:00:00Z onwards, its own included: from that instant it cannot
-synchronize until it is rebuilt on a later floor. Moving the window forward is
+synchronise until it is rebuilt on a later floor. Moving the window forward is
 a release's job.
 
 ## 3. NTP protocol conformance (NR)
@@ -103,17 +100,17 @@ bounded by the caller's timeout, and consecutive attempts are separated by a
 one-second delay.
 
 **NR-4.** `synchronize_ntp()` succeeds immediately, without network traffic,
-when the clock is already synchronized.
+when the clock is already synchronised.
 
 **NR-5.** A transmit timestamp's seconds field carries no era number, so one
 value denotes one instant per NTP era. The era is chosen as whichever reading
-falls inside FR-5's window; a value that no era places inside it is refused.
+falls inside FR-5's window; a value that no era places inside it is rejected.
 FR-8 makes the window narrower than an era, so at most one reading can qualify
 and no tie can arise.
 
 A build whose window predates the 2036-02-07 rollover accepts era 0 only. What
 carries the client across the rollover is moving the floor past it, at which
-point the same expression starts selecting era 1 — the client never guesses.
+point the same expression starts selecting era 1.
 
 **NR-6.** The 32-bit fraction field is converted to microseconds by integer
 arithmetic. The implementation contains no floating-point operation, so no
@@ -125,28 +122,28 @@ The trust boundary (`CXX-12.1`) is the 48 bytes of a received UDP datagram.
 `parse_ntp_response()` is the sole crossing point; no code downstream of it
 re-validates, and none may assume anything it does not establish.
 
-**VR-1.** A reply whose mode is not 4 (server) is refused.
+**VR-1.** A reply whose mode is not 4 (server) is rejected.
 
 **VR-2.** A reply whose leap indicator is 3 (alarm — the server's own clock is
-unsynchronized) is refused.
+unsynchronised) is rejected.
 
-**VR-3.** A reply whose stratum is outside 1–15 is refused. Stratum 0 is
-Kiss-o'-Death, 16 means unsynchronized (RFC 5905 §7.3), and 17–255 are reserved.
+**VR-3.** A reply whose stratum is outside 1–15 is rejected. Stratum 0 is
+Kiss-o'-Death, 16 means unsynchronised (RFC 5905 §7.3), and 17–255 are reserved.
 
 **VR-4.** A reply whose originate timestamp does not equal the nonce sent for
-that attempt is refused. This is the anti-replay property: it is what
+that attempt is rejected. This is the anti-replay property: it is what
 distinguishes a live reply from a captured one replayed later.
 
 It is evaluated **first**, ahead of VR-1 to VR-3. A datagram that has not shown
-it belongs to this attempt is therefore refused for that reason and no other,
+it belongs to this attempt is therefore rejected for that reason and no other,
 which is what VR-7 rests on.
 
-**VR-5.** A reply whose transmit timestamp seconds field is zero is refused.
-Zero denotes an unset clock and must be refused before the era rebase of NR-5,
+**VR-5.** A reply whose transmit timestamp seconds field is zero is rejected.
+Zero denotes an unset clock and must be rejected before the era rebase of NR-5,
 which would otherwise map it onto a valid-looking instant.
 
 **VR-6.** A reply whose timestamp falls outside
-`[MIN_EPOCH_SECONDS, MAX_EPOCH_SECONDS)` under every era is refused (NR-5).
+`[MIN_EPOCH_SECONDS, MAX_EPOCH_SECONDS)` under every era is rejected (NR-5).
 Both edges of that window are reachable from the wire, and both are tested: a
 ceiling no message can reach is a check that cannot fail.
 
@@ -156,7 +153,7 @@ waiting for a valid reply until its timeout.
 
 VR-4 running first is what makes this cover every unauthenticated datagram
 rather than only the ones that are otherwise well-formed: a forged or replayed
-packet cannot deny a synchronization that would otherwise have succeeded,
+packet cannot deny a synchronisation that would otherwise have succeeded,
 whatever else is wrong with it. A reply that passes VR-4 and then fails VR-1,
 VR-2, VR-3, VR-5 or VR-6 is a real server reporting an unusable state, and does
 end the attempt.
@@ -165,19 +162,19 @@ end the attempt.
 (`CXX-08.3`). A callback records an outcome in plain stores and returns;
 sending, reporting and tearing down all happen in the caller's context.
 
-Plain rather than atomic, and the argument is the execution model rather than
-the fields. lwIP runs in a single-core background context under the `NO_SYS`
-configuration the adapter asserts, so a callback runs to completion with
-respect to the mainline and there is no interleaving for an ordering to
-protect; the mainline's spin on the published flags cannot be hoisted either,
-because every call in that loop body leaves the translation unit through
-`INtpTransport`. Both halves are load-bearing, which is what makes the `NO_SYS`
-assertion a correctness guard rather than a portability note: a preemptive
-arrangement — a second core servicing lwIP, or a `NO_SYS=0` build — breaks this
-silently, and under one the flags must be published through
-`pico_util::Published` as the wall clock's are.
+The stores are plain rather than atomic; their correctness rests on the
+execution model, not on the fields. lwIP runs in a single-core background
+context under the `NO_SYS` configuration the adapter asserts, so a callback runs
+to completion with respect to the mainline and there is no interleaving for an
+ordering to protect; the mainline's spin on the published flags cannot be
+hoisted either, because every call in that loop body leaves the translation unit
+through `INtpTransport`. Both conditions are needed for correct publication,
+which is what makes the `NO_SYS` assertion a correctness guard rather than a
+portability note: a pre-emptive arrangement — a second core servicing lwIP, or a
+`NO_SYS=0` build — breaks this silently, and under one the flags must be
+published through `pico_util::Published` as the wall clock's are.
 
-One exception, and it is the only one: `pbuf_free()` on the datagram lwIP hands
+The only exception is `pbuf_free()` on the datagram lwIP hands
 the receive callback. The lwIP API requires the callback to release it, and it
 returns to lwIP's own pool, which is interrupt-safe by construction — unlike
 the C heap, where a free from a callback that pre-empted a mainline allocation
@@ -190,13 +187,13 @@ and an attempt whose DNS lookup outlives it releases its slot with one store.
 **AR-1.** Every public entry point is `[[nodiscard]]`. Each returns a status
 that is its only failure channel, since the target builds without exceptions.
 
-**AR-2.** `synchronize_ntp()` refuses a timeout that is not positive or that
+**AR-2.** `synchronize_ntp()` rejects a timeout that is not positive or that
 exceeds `MAX_SYNC_TIMEOUT` with `NtpError::INVALID_TIMEOUT`, without network
-traffic. The check comes first, so it holds on a clock already synchronized,
+traffic. The check comes first, so it holds on a clock already synchronised,
 ahead of NR-4.
 
-**AR-3.** `apply_wall_clock_time()` applies FR-5 and reports refusal through its
-return value.
+**AR-3.** `apply_wall_clock_time()` applies FR-5 and reports rejection through
+its return value.
 
 **AR-4.** `settimeofday()` and `_settimeofday()` share validation and the
 `apply_wall_clock_time()` store. A null time pointer, a negative `tv_sec`, a
@@ -227,12 +224,13 @@ network failure gives up on a state that was about to clear.
 lwIP calls every lookup back, with a null address on failure, and that callback
 releases the slot, so a caller that retries after a few seconds succeeds.
 
-**AR-7.** A board without an RP2350 and the CYW43 radio is refused at
-configure. Synchronisation runs over the radio, and pico-logging needs the
-RP2350's exclusive access, so the library declares `PLATFORM rp2350 CYW43` to
-the family bootstrap, which refuses a board without what a library declares. A consumer adding it on such a board fails
-at configure, naming what the board lacks, rather than in the build or on the
-device. A Pico W (RP2040) is refused at configure and the library cannot build for it (FW-1).
+**AR-7.** Configuration fails for a board without an RP2350 and the CYW43 radio.
+Synchronisation runs over the radio, and pico-logging needs the RP2350's
+exclusive access, so the library declares `PLATFORM rp2350 CYW43` to the family
+bootstrap, which fails the configure for a board without what a library
+declares. A consumer adding it on such a board fails at configure, naming what
+the board lacks, rather than in the build or on the device. Configuration fails
+for a Pico W (RP2040), which the library cannot build for (FW-1).
 
 ## 6. Gates
 
@@ -274,40 +272,40 @@ none of them is ours to change.
 | ID | Established by | Criterion |
 |---|---|---|
 | FR-1 | `wall_clock_test.cpp` `ComputeEpochOffset.ProducesTheOffsetBetweenEpochAndUptime`, `ApplyOffset.AddsTheOffsetToTheMonotonicReading` | Offset equals epoch microseconds minus the monotonic reading, and a read adds it back to the monotonic reading |
-| FR-2 | `tests/device/main.cpp` `newlib-clocks-start-at-uptime` | Before synchronization, `gettimeofday()`, `time()` and `std::chrono::system_clock` fall within their SDK uptime brackets, allowing representation rounding; the synchronization state is false |
+| FR-2 | `tests/device/main.cpp` `newlib-clocks-start-at-uptime` | Before synchronisation, `gettimeofday()`, `time()` and `std::chrono::system_clock` fall within their SDK uptime brackets, allowing representation rounding; the synchronisation state is false |
 | FR-3 | `wall_clock_test.cpp` `ApplyOffset.ClampsANegativeResultToTheEpoch` | A negative sum yields 0 |
 | FR-4 | `wall_clock_test.cpp` `WallClock.StartsUnsynchronized`, `WallClock.PublishesAnOffsetAndLatchesSynchronized` | `synchronized()` is false before any store and true after one. That it never returns to false is structural — nothing clears the flag — and is review-only |
-| FR-5 | `wall_clock_test.cpp` `ComputeEpochOffset.EnforcesTheSecondsWindowAtItsEdges`, `.RejectsOutOfRangeMicroseconds`, `.RejectsTheSecondsForMicrosecondsMixUp` | Both window edges and 999999/1000000 classify correctly; the microseconds-for-seconds mix-up is refused rather than overflowing. That a refusal leaves the offset and the synchronization state unchanged is review-only: `apply_wall_clock_time` returns before it stores |
-| FR-6 | `wall_clock_test.cpp` `WallClock.ReadsAreNeverTornUnderAConcurrentWriter`, `.CarriesTheFullSignedRangeAcrossTheSplit`; `tests/device/main.cpp` `irq-clock-read-survives-mainline-set`; review of `pico_util::Published`'s bounded retry | Under a concurrent writer no reader observes a value that was never stored; every value round-trips across the 32-bit split. Device interrupt reads in windows around three mainline stores return whole permitted values (old or new offset); callbacks must run in every window, and stores are at least one second apart. This is statistical sampling and does not establish preemption inside a store. Preemption coverage for the same `pico_util::Published<…, SLOT_RING_READER_MAY_PREEMPT>` primitive is supplied by pico-util:CR-3's device case `slot-ring-irq-reader-publishes-whole-values` at pico-util `b9a1a1f`, with statistical coverage; pico-util's `src/publish/` is identical there and at the pinned `2afe315`. That a read does not block, spin or disable interrupts is structural — the retry is bounded by `MAX_READ_ATTEMPTS` and the words are 32-bit atomics — and is review-only. A read that cannot be validated is reported, and `_gettimeofday` fails with `EAGAIN` on it: that path is **review-only**, since `time_keeper.cpp` builds for the target alone and exhaustion needs a writer breaking its contract mid-read, which no host case produces deterministically. |
+| FR-5 | `wall_clock_test.cpp` `ComputeEpochOffset.EnforcesTheSecondsWindowAtItsEdges`, `.RejectsOutOfRangeMicroseconds`, `.RejectsTheSecondsForMicrosecondsMixUp` | Both window edges and 999999/1000000 classify correctly; the microseconds-for-seconds mix-up is rejected rather than overflowing. That a rejection leaves the offset and the synchronisation state unchanged is review-only: `apply_wall_clock_time` returns before it stores |
+| FR-6 | `wall_clock_test.cpp` `WallClock.ReadsAreNeverTornUnderAConcurrentWriter`, `.CarriesTheFullSignedRangeAcrossTheSplit`; `tests/device/main.cpp` `irq-clock-read-survives-mainline-set`; review of `pico_util::Published`'s bounded retry | Under a concurrent writer no reader observes a value that was never stored; every value round-trips across the 32-bit split. Device interrupt reads in windows around three mainline stores return whole permitted values (old or new offset); callbacks must run in every window, and stores are at least one second apart. This is statistical sampling and does not establish pre-emption inside a store. Preemption coverage for the same `pico_util::Published<…, SLOT_RING_READER_MAY_PREEMPT>` primitive is supplied by pico-util:CR-3's device case `slot-ring-irq-reader-publishes-whole-values` at pico-util `b9a1a1f`, with statistical coverage; pico-util's `src/publish/` is identical there and at the pinned `2afe315`. That a read does not block, spin or disable interrupts is structural — the retry is bounded by `MAX_READ_ATTEMPTS` and the words are 32-bit atomics — and is review-only. A read that cannot be validated is reported, and `_gettimeofday` fails with `EAGAIN` on it: that path is **review-only**, since `time_keeper.cpp` builds for the target alone and exhaustion needs a writer breaking its contract mid-read, which no host case produces deterministically. |
 | FR-7 | `tests/device/main.cpp` `newlib-clock-advances-without-resetting-offset` | After a valid local set, reads across yields retain the applied offset, never decrease and advance without another set |
 | FR-8 | `ntp_message_test.cpp` `NtpMessage.ThePlausibilityWindowIsNarrowerThanAnNtpEra`, `.RefusesEveryEra1FieldWhileTheWindowPredatesTheRollover` | The window is narrower than an era, and a window below the rollover admits no era-1 field |
 | NR-1 | `ntp_message_test.cpp` `NtpMessage.BuildsAClientRequestCarryingTheNonce` | First byte is 0x1B |
 | NR-2 | `ntp_message_test.cpp` `NtpMessage.BuildsAClientRequestCarryingTheNonce`; `ntp_synchronizer_test.cpp` `NtpSynchronizer.GivesEachAttemptItsOwnNonce` | The nonce occupies bytes 40–47 big-endian, and a fresh one is drawn for each attempt. That the request sent carries the attempt's own nonce is review-only, of `ntp_synchronizer.cpp` |
-| NR-3 | `ntp_synchronizer_test.cpp` `TriesEveryAttemptBeforeGivingUp`, `WaitsBetweenAttemptsButNotAfterTheLast` | An unreachable server is retried `MAX_REQUEST_ATTEMPTS` times with `MAX_REQUEST_ATTEMPTS - 1` waits between them and none after the last. Transport-independent, which is what the seam is for; no device run is kept for it |
+| NR-3 | `ntp_synchronizer_test.cpp` `TriesEveryAttemptBeforeGivingUp`, `WaitsBetweenAttemptsButNotAfterTheLast` | An unreachable server is retried `MAX_REQUEST_ATTEMPTS` times with `MAX_REQUEST_ATTEMPTS - 1` waits between them and none after the last. The retry structure is transport-independent. No device run is kept for it |
 | NR-4 | Device run | A second call returns without a DNS query. The run on this release is pending (FW-3). Direct duration and packet capture are absent (FW-2) |
-| NR-5 | `ntp_message_test.cpp` `NtpMessage.RefusesEveryEra1FieldWhileTheWindowPredatesTheRollover`, `.AcceptsATimestampExactlyAtThePlausibilityFloor`, `.AcceptsTheSecondBelowThePlausibilityCeiling` | Both sides of the era boundary are refused under this window; both edges of the window are accepted through era 0 |
+| NR-5 | `ntp_message_test.cpp` `NtpMessage.RefusesEveryEra1FieldWhileTheWindowPredatesTheRollover`, `.AcceptsATimestampExactlyAtThePlausibilityFloor`, `.AcceptsTheSecondBelowThePlausibilityCeiling` | Both sides of the era boundary are rejected under this window; both edges of the window are accepted through era 0 |
 | NR-6 | `ntp_message_test.cpp` `NtpMessage.ConvertsTheFractionExactly`; `arm-none-eabi-nm -u` over this library's objects | The conversion table holds at 0, ¼, ½, ¾ and full scale; no `__aeabi_[df]` symbol is referenced |
-| VR-1 | `ntp_message_test.cpp` `NtpMessage.RejectsAnythingButAServerReply` | Modes 0, 3 and 5 are refused with `MODE` |
-| VR-2 | `ntp_message_test.cpp` `NtpMessage.RejectsTheLeapAlarmCondition`, `.AcceptsThePendingLeapSecondIndicators` | LI 3 refused; LI 0–2 accepted |
-| VR-3 | `ntp_message_test.cpp` `NtpMessage.RejectsUnusableStrata`, `.AcceptsPrimaryAndSecondaryStrata` | 0, 16, 17 and 255 refused; 1 and 15 accepted |
-| VR-4 | `ntp_message_test.cpp` `NtpMessage.RejectsAReplyToADifferentRequest`, `.RejectsAReplayedCapture`, `.RequestAndResponseAgreeOnWhereTheNonceLives`, `.AnUnauthenticatedDatagramIsOnlyEverAnOriginateMismatch` | A mismatched nonce is refused; a reply valid under one nonce is refused under another; a built request round-trips; a mismatched nonce outranks every other defect in the message |
-| VR-5 | `ntp_message_test.cpp` `NtpMessage.RejectsAnUnsetTransmitTimestamp`, `.RejectsAnUnsetTimestampEvenWithANonZeroFraction` | A zero seconds field is refused whatever the fraction |
+| VR-1 | `ntp_message_test.cpp` `NtpMessage.RejectsAnythingButAServerReply` | Modes 0, 3 and 5 are rejected with `MODE` |
+| VR-2 | `ntp_message_test.cpp` `NtpMessage.RejectsTheLeapAlarmCondition`, `.AcceptsThePendingLeapSecondIndicators` | LI 3 rejected; LI 0–2 accepted |
+| VR-3 | `ntp_message_test.cpp` `NtpMessage.RejectsUnusableStrata`, `.AcceptsPrimaryAndSecondaryStrata` | 0, 16, 17 and 255 rejected; 1 and 15 accepted |
+| VR-4 | `ntp_message_test.cpp` `NtpMessage.RejectsAReplyToADifferentRequest`, `.RejectsAReplayedCapture`, `.RequestAndResponseAgreeOnWhereTheNonceLives`, `.AnUnauthenticatedDatagramIsOnlyEverAnOriginateMismatch` | A mismatched nonce is rejected; a reply valid under one nonce is rejected under another; a built request round-trips; a mismatched nonce outranks every other defect in the message |
+| VR-5 | `ntp_message_test.cpp` `NtpMessage.RejectsAnUnsetTransmitTimestamp`, `.RejectsAnUnsetTimestampEvenWithANonZeroFraction` | A zero seconds field is rejected whatever the fraction |
 | VR-6 | `ntp_message_test.cpp` `NtpMessage.RejectsATimestampBelowThePlausibilityFloor`, `.AcceptsATimestampExactlyAtThePlausibilityFloor`, `.AcceptsTheSecondBelowThePlausibilityCeiling`, `.RejectsATimestampAtAndAboveThePlausibilityCeiling` | Both edges classify correctly, and both are reachable from the wire |
-| VR-7 | `ntp_message_test.cpp` `NtpMessage.AnUnauthenticatedDatagramIsOnlyEverAnOriginateMismatch`; `ntp_synchronizer_test.cpp` `ADatagramFromElsewhereDoesNotEndTheAttempt`, `ADatagramTooShortForAMessageDoesNotEndTheAttempt`, `AReplyToAnotherRequestIsDroppedNotCounted`; `tests/device/main.cpp` `lwip-rejects-unrelated-reply-before-valid-reply` | Host checks establish that unauthenticated replies reach only `ORIGINATE_MISMATCH`. The device case delivers wrong-port, short, wrong-originate and wrong-address UDP replies successively to one public synchronization attempt. A shim on the request's real UDP PCB records exactly one callback per datagram with the expected source address, port and length, then forwards the original arguments to the saved adapter callback unchanged. After each bad datagram is polled, the original endpoint stays open and the clock stays unsynchronized. One valid nonce-matching reply passes through the same shim and synchronizes, with exactly one request and a clock value within the public call bracket; the original callback is restored. The device case exercises the port check through the real lwIP adapter. Source address 127.0.0.2 is supplied by `udp_sendto_if_src` over loopback. This covers the lwIP glue, not the CYW43 Wi-Fi path |
+| VR-7 | `ntp_message_test.cpp` `NtpMessage.AnUnauthenticatedDatagramIsOnlyEverAnOriginateMismatch`; `ntp_synchronizer_test.cpp` `ADatagramFromElsewhereDoesNotEndTheAttempt`, `ADatagramTooShortForAMessageDoesNotEndTheAttempt`, `AReplyToAnotherRequestIsDroppedNotCounted`; `tests/device/main.cpp` `lwip-rejects-unrelated-reply-before-valid-reply` | Host checks establish that unauthenticated replies reach only `ORIGINATE_MISMATCH`. The device case delivers wrong-port, short, wrong-originate and wrong-address UDP replies successively to one public synchronisation attempt. A shim on the request's real UDP PCB records exactly one callback per datagram with the expected source address, port and length, then forwards the original arguments to the saved adapter callback unchanged. After each bad datagram is polled, the original endpoint stays open and the clock stays unsynchronised. One valid nonce-matching reply passes through the same shim and synchronises, with exactly one request and a clock value within the public call bracket; the original callback is restored. The device case exercises the port check through the real lwIP adapter. Source address 127.0.0.2 is supplied by `udp_sendto_if_src` over loopback. This covers the lwIP glue, not the CYW43 Wi-Fi path |
 | VR-8 | Review of the lwIP callbacks — `lwip_ntp_transport.cpp` `on_dns_resolved` and the `udp_recv` lambda, `ntp_synchronizer.cpp` `Slot::on_resolved` and `Slot::on_datagram`; the C-heap `nm` gate | No callback contains a `PICO_LOG_*`, a lock acquisition, a send, or an allocation other than the required `pbuf_free`; no object of this library references the C heap. `ntp_client.cpp` is composition, not a callback, and logs deliberately |
-| AR-1 | ctest `pico_time_refuses_discarded_synchronized`; the compiler, through pico-util's `[[nodiscard]]` `Result` | Discarding `is_time_synchronized()` fails to compile with `nodiscard`, while the same call used compiles; every other entry point returns a `Result`, whose discard pico-util refuses, and warnings are errors |
-| AR-2 | `ntp_synchronizer_test.cpp` `RefusesANonPositiveTimeoutWithoutTouchingTheNetwork`; review of `ntp_client.cpp` `synchronize_ntp` for the ceiling and the order | A zero and a negative timeout are each refused with `INVALID_TIMEOUT` before any network call. The `MAX_SYNC_TIMEOUT` ceiling is review-only: it bounds how long a caller may surrender its core, which is a policy of the public entry point rather than of the transport-agnostic synchronizer |
+| AR-1 | ctest `pico_time_refuses_discarded_synchronized`; the compiler, through pico-util's `[[nodiscard]]` `Result` | Discarding `is_time_synchronized()` fails to compile with `nodiscard`, while the same call used compiles; every other entry point returns a `Result`, whose discard pico-util marks `[[nodiscard]]`, and warnings are errors |
+| AR-2 | `ntp_synchronizer_test.cpp` `RefusesANonPositiveTimeoutWithoutTouchingTheNetwork`; review of `ntp_client.cpp` `synchronize_ntp` for the ceiling and the order | A zero and a negative timeout are each rejected with `INVALID_TIMEOUT` before any network call. The `MAX_SYNC_TIMEOUT` ceiling is review-only: it bounds how long a caller may surrender its core, which is a policy of the public entry point rather than of the transport-agnostic synchronizer |
 | AR-3 | Review of `time_keeper.cpp` `apply_wall_clock_time` | It returns `MICROSECONDS_INVALID` for an out-of-range microseconds field and `EPOCH_OUT_OF_RANGE` for an out-of-window epoch, so a caller who passed microseconds-since-epoch into the seconds argument can find that mistake. Review-only: `pico_time_time_sync` is not in the host build — it compiles lwIP and SDK sources — so the only other reference is the firmware consumer smoke build, `tests/consumer/consumer_smoke.cxx`, where linking is the assertion |
-| AR-4 | Review of `time_keeper.cpp` setters; firmware `pico_time_settimeofday_probe` map and `arm-none-eabi-nm`; `tests/device/main.cpp` `settimeofday-refuses-invalid-inputs` calls POSIX `settimeofday()` | Each refused case returns −1, sets `EINVAL` and returns before the clock is stored; a valid call reaches the shared clock store; the linked `settimeofday` is strong (`T`) and belongs to `time_keeper.cpp.o`. The device case checks negative seconds, negative microseconds, 1000000 microseconds and both out-of-window edges before and after a valid POSIX set; refusal requires −1 with `EINVAL` and unchanged pico-time state and offset |
+| AR-4 | Review of `time_keeper.cpp` setters; firmware `pico_time_settimeofday_probe` map and `arm-none-eabi-nm`; `tests/device/main.cpp` `settimeofday-refuses-invalid-inputs` calls POSIX `settimeofday()` | Each rejected case returns −1, sets `EINVAL` and returns before the clock is stored; a valid call reaches the shared clock store; the linked `settimeofday` is strong (`T`) and belongs to `time_keeper.cpp.o`. The device case checks negative seconds, negative microseconds, 1000000 microseconds and both out-of-window edges before and after a valid POSIX set; rejection requires −1 with `EINVAL` and unchanged pico-time state and offset |
 | AR-5 | `lwipopts-required` consumer case, a firmware configure without the variable | Configuration fails with the diagnostic naming the variable |
-| AR-6 | `ntp_synchronizer_test.cpp` — `ALookupThatNeverLandsHoldsItsSlot`, `SlotExhaustionIsReportedAndIsRetryable`, `AnAbandonedLookupReleasesItsSlotWhenItLands`, `AResolutionLandingUnderTheLockIsSerialized` | Three attempts abandoned in resolution hold all three slots; the next call fails with `NO_ATTEMPT_SLOT`, opens no endpoint, and reports the failure as retryable; once each abandoned lookup lands its slot is released and a later call synchronizes normally, and a lookup landing under the lock is serialized behind it. That a slot is released exactly once is review-only, of the `resolve_pending` and `abandoned` handshake under the lock. Established here rather than by a device run: a lookup landing after the attempt that started it was torn down is a race the bench cannot induce on demand |
+| AR-6 | `ntp_synchronizer_test.cpp` — `ALookupThatNeverLandsHoldsItsSlot`, `SlotExhaustionIsReportedAndIsRetryable`, `AnAbandonedLookupReleasesItsSlotWhenItLands`, `AResolutionLandingUnderTheLockIsSerialized` | Three attempts abandoned in resolution hold all three slots; the next call fails with `NO_ATTEMPT_SLOT`, opens no endpoint, and reports the failure as retryable; once each abandoned lookup lands its slot is released and a later call synchronises normally, and a lookup landing under the lock is serialized behind it. That a slot is released exactly once is review-only, of the `resolve_pending` and `abandoned` handshake under the lock. Established here rather than by a device run: a lookup landing after the attempt that started it was torn down is a race the bench cannot induce on demand |
 | AR-7 | `pico-w-refused` and `pico2-refused` consumer cases, a consumer adding the library | On `pico_w` the configure fails saying `PICO_TIME needs PICO_PLATFORM rp2350`; on `pico2`, saying `PICO_TIME needs a board with the CYW43 radio` |
 
 Device cases in `tests/device/` exercise the clock, newlib glue and the lwIP
-adapter. FR-2 runs before synchronization, followed by VR-7's loopback exchange,
-then AR-4, FR-7 and FR-6. AR-4 preserves the synchronization state and offset on
-each refusal before and after its valid POSIX set, including an already
-synchronized entry. The image finishes within 20 seconds of console attachment
+adapter. FR-2 runs before synchronisation, followed by VR-7's loopback exchange,
+then AR-4, FR-7 and FR-6. AR-4 preserves the synchronisation state and offset on
+each rejection before and after its valid POSIX set, including an already
+synchronised entry. The image finishes within 20 seconds of console attachment
 and reports no measurements. Build the board image with:
 
 ```sh
