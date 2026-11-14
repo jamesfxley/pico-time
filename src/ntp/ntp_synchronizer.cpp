@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: MIT
-// The attempt loop and the slot pool. See ntp_synchronizer.hpp for why this is
-// above the transport seam rather than inside the lwIP adapter.
 
 #include <algorithm>
 #include <array>
@@ -18,11 +16,7 @@
 namespace pico_time {
 namespace {
 
-/// Map a wire verdict onto the public taxonomy.
-///
-/// ORIGINATE_MISMATCH has no mapping on purpose: a datagram that has not proved
-/// it belongs to this exchange is dropped rather than allowed to end an attempt
-/// (VR-7), so it never reaches here.
+/// Map a wire verdict to a public error. Nonce mismatches never arrive (VR-7).
 [[nodiscard]] NtpError from_reject(NtpReject reason) {
     switch (reason) {
         case NtpReject::MODE:
@@ -45,9 +39,8 @@ namespace {
 }  // namespace
 
 void NtpSynchronizer::Slot::on_resolved(const NtpAddress& address) {
-    // Runs in the transport's callback context, holding its lock. Clear the
-    // pending flag first, then check whether the caller gave up: if so it has
-    // already torn the attempt down and this slot is ours to release.
+    // Clear pending before checking abandonment. The callback owns release
+    // once the caller has abandoned the slot, with the transport lock held.
     resolve_pending = false;
     if (abandoned) {
         in_use = false;
@@ -58,17 +51,15 @@ void NtpSynchronizer::Slot::on_resolved(const NtpAddress& address) {
         complete = true;
         return;
     }
-    // Record and return. The request is sent by the mainline once it observes
-    // this flag, so nothing is allocated and no lock is taken here (VR-8).
+    // The mainline sends after observing address_ready. No allocation or lock
+    // acquisition occurs in this callback (VR-8).
     server_address = address;
     address_ready = true;
 }
 
 void NtpSynchronizer::Slot::on_datagram(
     const NtpAddress& sender, std::span<const std::uint8_t> datagram) {
-    // A datagram from somewhere else, or too short to be an NTP message, is not
-    // this exchange's failure. Drop it and keep waiting rather than letting a
-    // stray packet end the attempt.
+    // Stray or short datagrams leave the attempt waiting for its reply.
     if (!address_ready || sender.opaque != server_address.opaque ||
         datagram.size() < NTP_MESSAGE_LENGTH) {
         return;
@@ -79,12 +70,8 @@ void NtpSynchronizer::Slot::on_datagram(
 
     const NtpParse parse = parse_ntp_response(raw, nonce);
     if (!parse.sample.has_value()) {
-        // VR-7. The nonce check runs first, so ORIGINATE_MISMATCH is the only
-        // verdict a datagram that has not proved it belongs to this exchange
-        // can reach. Dropping it -- rather than recording a failure -- is what
-        // stops a forgery or a replay from ending an attempt that would
-        // otherwise have succeeded. Every other verdict is a real server's
-        // report of itself, and does end the attempt.
+        // A nonce mismatch leaves the attempt waiting. Other rejections end it
+        // (VR-7).
         if (parse.reason == NtpReject::ORIGINATE_MISMATCH) {
             return;
         }
@@ -113,8 +100,7 @@ void NtpSynchronizer::Slot::reset() {
 }
 
 NtpSynchronizer::Slot* NtpSynchronizer::claim_slot() {
-    // Call with the transport's lock held: it is what serializes this against
-    // the callback that releases a slot.
+    // Call with the transport lock held to serialise callback releases.
     for (Slot& slot : slots_) {
         if (!slot.in_use) {
             slot.reset();
@@ -127,8 +113,7 @@ NtpSynchronizer::Slot* NtpSynchronizer::claim_slot() {
 }
 
 void NtpSynchronizer::release_slot(Slot& slot) {
-    // Give the slot back, or mark it for the resolution callback to give back
-    // when the lookup it cannot cancel finally lands. Lock held.
+    // With the lock held, defer release to any outstanding resolution callback.
     if (slot.resolve_pending) {
         slot.abandoned = true;
         return;
@@ -150,10 +135,10 @@ bool NtpSynchronizer::poll_until(const Slot& slot, std::uint64_t start_ms,
                                  std::uint64_t budget_ms,
                                  bool (*ready)(const Slot&)) {
     while (!ready(slot)) {
-        // Unsigned difference, so a counter that steps back ends the wait
-        // early instead of never ending it. An absolute deadline cannot: a
-        // clock that wraps past it leaves a comparison that is false forever,
-        // which on the no-reply path is a mainline hang rather than a timeout.
+        // The loop uses an elapsed unsigned difference, not an absolute
+        // deadline. A deadline past a wrapping counter is never reached, and
+        // the no-reply wait would never end. A backward clock step instead ends
+        // the wait early.
         if (transport_->now_ms() - start_ms >= budget_ms) {
             return false;
         }
@@ -165,8 +150,7 @@ bool NtpSynchronizer::poll_until(const Slot& slot, std::uint64_t start_ms,
 
 NtpError NtpSynchronizer::run_attempt(Slot& slot,
                                       std::chrono::milliseconds timeout) {
-    // One budget for the whole attempt, so resolution and reply share the
-    // caller's allowance instead of each being given a full copy of it.
+    // Resolution and reply share one timeout.
     const std::uint64_t start_ms = transport_->now_ms();
     const auto budget_ms = static_cast<std::uint64_t>(timeout.count());
 
@@ -174,8 +158,8 @@ NtpError NtpSynchronizer::run_attempt(Slot& slot,
         return NtpError::SOCKET_FAILED;
     }
 
-    // Start the lookup under the lock, so the callback -- which needs the same
-    // lock -- cannot fire and clear resolve_pending before it is set.
+    // The lookup starts under the lock. Its callback needs the same lock, so
+    // it cannot clear resolve_pending before it is set.
     transport_->lock();
     const ResolveStatus status =
         transport_->resolve(server_, slot.server_address, slot);
@@ -213,8 +197,7 @@ NtpError NtpSynchronizer::run_attempt(Slot& slot,
         poll_until(slot, start_ms, budget_ms,
                    [](const Slot& state) { return state.complete; });
 
-    // Close before reading `sample`. A second datagram could otherwise
-    // overwrite the timestamp halves while the caller reads them (CXX-08.1).
+    // Close before reading sample to prevent another datagram overwriting it.
     transport_->close();
 
     if (!completed) {
@@ -230,25 +213,15 @@ pico_util::Result<SynchronizedTime, NtpError> NtpSynchronizer::synchronize(
     }
 
     NtpError last = NtpError::TIMED_OUT;
-    // Fresh state, nonce and endpoint per attempt: a late response to an
-    // abandoned attempt must not land in the next attempt's callbacks, and a
-    // reused nonce would make it indistinguishable from a fresh reply.
+    // A late reply must not reach the next attempt. Each has a fresh nonce
+    // and endpoint.
     for (std::size_t attempt = 0; attempt < MAX_REQUEST_ATTEMPTS; ++attempt) {
         transport_->lock();
         Slot* const slot = claim_slot();
         transport_->unlock();
         if (slot == nullptr) {
-            // AR-6. Every slot is held by a lookup that has not landed, which
-            // takes a previous call whose attempts all timed out inside
-            // resolution. Transient: every lookup calls back, and that callback
-            // releases the slot. Returned rather than retried, because nothing
-            // this loop does can clear it.
-            //
-            // Only from the first attempt, which is what AR-6 promises: no
-            // network traffic and no attempt spent. Reaching here later means
-            // this call has already opened an endpoint and issued a lookup, so
-            // reporting an empty pool would both contradict that promise and
-            // discard the diagnosis those attempts produced.
+            // Slot exhaustion is reported only on entry, before network traffic
+            // (AR-6). Later exhaustion returns the preceding attempt's error.
             if (attempt == 0) {
                 return NtpError::NO_ATTEMPT_SLOT;
             }
@@ -259,8 +232,7 @@ pico_util::Result<SynchronizedTime, NtpError> NtpSynchronizer::synchronize(
         const NtpError error = run_attempt(*slot, timeout);
         const SynchronizedTime sample = slot->sample;
 
-        // Decide the slot's fate under the lock, serialized against the
-        // resolution callback.
+        // Serialise release with the resolution callback.
         transport_->lock();
         release_slot(*slot);
         transport_->unlock();
@@ -270,7 +242,6 @@ pico_util::Result<SynchronizedTime, NtpError> NtpSynchronizer::synchronize(
         }
         last = error;
 
-        // No point waiting after the final attempt.
         if (attempt + 1 < MAX_REQUEST_ATTEMPTS) {
             transport_->wait(RETRY_DELAY);
         }

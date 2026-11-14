@@ -1,14 +1,13 @@
 # Future work
 
-Work deliberately not done, one entry per deferral, in the form `EN-03.7`
-defines.
+Deferred work follows [EN-03.7](../infra/house/standard/engineering/03-documentation.md).
 
 ## FW-1 — Pico W (RP2040) validation
 
 ### What is absent
 
-The library is refused on the Pico W (RP2040) at configure (AR-7), and no
-functional run exists on that board.
+Configuration fails on the Pico W (RP2040), and no functional run exists on
+that board (AR-7).
 
 ### Why it is not built
 
@@ -19,9 +18,9 @@ bench.
 
 ### What would have to be true to build it
 
-pico-logging:FW-1 is built. Then `PLATFORM rp2350` is dropped from this
-library's bootstrap, the functional NTP suite runs on a Pico W, and AR-7's
-RP2350 clause is re-specified.
+pico-logging completes RP2040 support. The library bootstrap can then omit
+`PLATFORM rp2350`, the NTP suite can run on a Pico W, and the RP2350 requirement
+can be revised (pico-logging:FW-1, AR-7).
 
 ### Version cost
 
@@ -36,22 +35,22 @@ pico-time; pico-logging:FW-1.
 
 ### What is absent
 
-NR-4 requires that a second `synchronize_ntp()` succeeds immediately and
-without network traffic. Neither the call's duration nor the absence of packets
+NR-4 requires a second `synchronize_ntp()` call to succeed immediately without
+network traffic. Neither the call's duration nor the absence of packets
 has been measured directly: log timestamps around the call include logging, and
 no packet capture exists.
 
 ### Why it is not built
 
-The no-network property rests on `src/time_sync/ntp_client.cpp`, which returns
-before transport initialization when the clock is synchronized. A direct
+The no-network behaviour follows from `src/time_sync/ntp_client.cpp`, which returns
+before transport initialisation when the clock is synchronised. A direct
 measurement needs a device run with a timing probe and a capture of the
 board's traffic.
 
 ### What would have to be true to build it
 
-A device run that times the second synchronization directly, and a DNS and
-packet capture over the same interval that shows no traffic.
+A device run times the second call directly and captures DNS and NTP traffic
+over the same interval, showing no packets.
 
 ### Version cost
 
@@ -79,8 +78,8 @@ release.
 
 ### What would have to be true to build it
 
-A device run of `pico_time_ntp_sync` that records the outcome of the second
-synchronization, committed as a run record.
+A committed device run record shows the outcome of the second call to
+`synchronize_ntp()` in `pico_time_ntp_sync`.
 
 ### Version cost
 

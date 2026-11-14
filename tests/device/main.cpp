@@ -71,7 +71,7 @@ struct OffsetRange {
            sample.value <= sample.after + offset.upper;
 }
 
-// FR-2: each interface is bracketed separately, including its own rounding.
+// Each clock interface is bracketed separately, allowing its rounding (FR-2).
 [[nodiscard]] bool clocks_start_at_uptime() {
     const auto sample = read_clock();
     const auto before_time = uptime_us() / MICROSECONDS_PER_SECOND;
@@ -143,7 +143,7 @@ struct RefusalResult {
     FailureDetail detail;
 };
 
-// AR-4: record the first unexpected outcome on the promised POSIX surface.
+// Record the first unexpected POSIX setter outcome (AR-4).
 void inspect_posix_set(RefusalResult& result, const timeval& value,
                        const char* phase, const char* input, bool valid) {
     const bool synchronized = pico_time::is_time_synchronized();
@@ -191,7 +191,7 @@ void inspect_posix_set(RefusalResult& result, const timeval& value,
     result.passed = passed && result.passed;
 }
 
-// AR-4: all invalid inputs run before and after one valid POSIX set.
+// Invalid inputs run before and after a valid POSIX set (AR-4).
 [[nodiscard]] RefusalResult refuses_invalid_inputs() {
     struct Input {
         const char* name = nullptr;
@@ -223,7 +223,7 @@ void inspect_posix_set(RefusalResult& result, const timeval& value,
     return result;
 }
 
-// FR-7: no writer runs between these reads; yields exercise the newlib shim.
+// No writer runs between reads. Yields exercise the newlib hook (FR-7).
 [[nodiscard]] bool clock_advances(OffsetRange offset) {
     const auto first = read_clock();
     auto previous = first;
@@ -240,7 +240,7 @@ void inspect_posix_set(RefusalResult& result, const timeval& value,
 }
 
 struct InterruptReads {
-    // Immutable while the repeating timer is registered. The new clock may
+    // Immutable while the repeating timer is registered. The new clock can
     // advance from new_epoch_us by no more than elapsed uptime since
     // started_us.
     OffsetRange old_offset{};
@@ -314,7 +314,7 @@ struct IrqStoreResult {
     // pico/time.h:810: a positive delay is from callback completion to the
     // next callback's start. This leaves mainline time between reads without
     // catch-up bursts. The fixed window samples around the store; it does
-    // not establish that an IRQ preempted the setter itself.
+    // not establish that an IRQ pre-empted the setter itself.
     if (!add_repeating_timer_us(IRQ_DELAY_US, read_in_interrupt, &reads,
                                 &timer)) {
         return {.failure = "could not start store interrupt timer"};
@@ -342,7 +342,7 @@ struct IrqStoreResult {
     return {.offset = stored, .failure = {}};
 }
 
-// FR-6: statistical sampling in windows around spaced mainline stores.
+// Statistical sampling surrounds spaced mainline stores (FR-6).
 // Preemption inside this setter is not a coverage precondition or a claim.
 [[nodiscard]] IrqResult irq_reads_survive(OffsetRange initial) {
     if (!initial.ok) {

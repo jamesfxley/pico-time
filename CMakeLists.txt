@@ -2,9 +2,7 @@ cmake_minimum_required(VERSION 3.26)
 
 include(cmake/pico_family_bootstrap.cmake)
 
-# AR-7. Synchronisation runs over the CYW43 radio, and pico-logging needs an
-# RP2350. As a dependency the board is the consumer's, and only that is checked
-# of it.
+# CYW43 supplies the radio. pico-logging requires RP2350 (AR-7).
 pico_family_bootstrap(PICO_TIME PLATFORM rp2350 CYW43)
 
 project(pico_time VERSION 0.2.0 LANGUAGES C CXX ASM)
@@ -12,73 +10,48 @@ project(pico_time VERSION 0.2.0 LANGUAGES C CXX ASM)
 house_cxx_common_settings(${PICO_TIME_BUILD_FIRMWARE})
 pico_family_init_sdk(${PICO_TIME_BUILD_FIRMWARE})
 
-# VENDOR_SOURCES takes the firmware flag: the Pico SDK compiles its own sources
-# into whichever target links its INTERFACE libraries, so a target-scoped
-# -Werror there would land on SDK and lwIP code this repo cannot fix. In the
-# firmware tree it goes back on per source, in src/time_sync/CMakeLists.txt.
-# The host tree links no SDK sources, so the target carries it directly.
-#
-# FREESTANDING follows the toolchain, which is the helper's default: the
-# portable core (wire format, clock arithmetic) is host-compiled for the test
-# suite, and a hosted build does have the libc behind _FORTIFY_SOURCE and the
-# dynamic loader behind the RELRO link options that a firmware image does not.
-#
-# LANGUAGES CXX because every source this repo owns is C++, and C diagnostics
-# here could only ever report on SDK code.
+# Firmware -Werror applies per source to exclude SDK sources. Hosted hardening
+# follows the toolchain. Only project-owned C++ needs strict diagnostics.
 house_cxx_add_strict_target(pico_time_strict
     VENDOR_SOURCES ${PICO_TIME_BUILD_FIRMWARE}
     LANGUAGES CXX
 )
 
-# Declares PICO_TIME_SANITIZE. Before the targets and before GoogleTest, and
-# build-wide rather than target-scoped, so the fetched framework is instrumented
-# too -- ASan's container-overflow detector needs both sides of a std::string
-# boundary built alike.
+# Sanitizers precede GoogleTest so both sides of container boundaries
+# are instrumented.
 house_cxx_enable_sanitizers(PICO_TIME)
 
-# Every knob this build has, declared before anything is added: a subdirectory
-# reading an option that has not been declared yet reads an empty string.
+# Options are declared before any subdirectory reads them.
 house_cxx_declare_tests_option(PICO_TIME)
 
-# libFuzzer targets (Clang only). Declared here rather than beside the targets
-# themselves so that enabling it on a configure that cannot honour it reports
-# the reason instead of silently building nothing.
+# Fuzzing is declared here so an unsupported configuration reports an error.
 house_cxx_declare_fuzzers_option(PICO_TIME)
 
-# Firmware-only: the examples exist to establish the traceability rows whose
-# criterion is a device run, so there is nothing to build for them on a host.
+# Device-validation examples need the firmware tree.
 set(PICO_TIME_ENABLE_EXAMPLES_DEFAULT OFF)
 if(PROJECT_IS_TOP_LEVEL AND PICO_TIME_BUILD_FIRMWARE)
     set(PICO_TIME_ENABLE_EXAMPLES_DEFAULT ON)
 endif()
 option(PICO_TIME_ENABLE_EXAMPLES "Build the firmware examples"
     ${PICO_TIME_ENABLE_EXAMPLES_DEFAULT})
-# The documents' firmware examples (tests/firmware), built only by this
-# project's own cross configure, never by a consumer that fetches it.
+# Document probes are built only by this project's firmware configure.
 pico_family_declare_probe_option(PICO_TIME)
 
-# Install/export is firmware-only: the package is one cross-compiled export
-# set. Portable core and NTP modules have public headers; their host tests use
-# the in-tree targets, not the installed ARM archives.
+# Installed archives are cross-compiled. Host tests use in-tree targets.
 house_cxx_declare_install_option(PICO_TIME AVAILABLE ${PICO_TIME_BUILD_FIRMWARE})
 
-# When this project's targets are exported, the fetched dependencies they link
-# must be in an export set too. Before the fetch below, or the dependency is
-# configured with its default first.
+# Install settings propagate before dependency configuration. Exported
+# static libraries must have their dependencies in an export set too.
 pico_family_propagate_install(PICO_TIME PICO_LOGGING)
 pico_family_propagate_install(PICO_TIME PICO_UTIL)
 
-# pico_util carries Result, the container the NTP error taxonomy is returned in
-# (CXX-07.1: the carrier is generic, the vocabulary is this library's). Fetched
-# unconditionally because pico_time::ntp is the portable half and is built and
-# tested on a host, where the firmware branch below never runs.
+# Both host and firmware NTP modules return pico_util::Result.
 pico_family_dependency(pico_util
     REPOSITORY https://github.com/jamesfxley/pico-util.git
     REVISION 2afe3150a52429cb61c2330041cb4ec2e26c00ef)
 pico_family_make_available(pico_util)
 
-# Only the lwIP transport needs the logger; the portable half has no dependency
-# on it, which is what lets that half build and be tested on a host.
+# The portable modules do not depend on the logger.
 if(PICO_TIME_BUILD_FIRMWARE)
     pico_family_dependency(pico_logging
         REPOSITORY https://github.com/jamesfxley/pico-logging.git
@@ -90,8 +63,8 @@ set(PICO_LWIPOPTS_TARGET "" CACHE STRING "Target carrying the application's lwip
 set(PICO_TIME_WIFI_SSID "" CACHE STRING "Wi-Fi SSID the example firmware should join")
 set(PICO_TIME_WIFI_PASSWORD "" CACHE STRING "Wi-Fi password (WPA2-PSK)")
 
-# VR-7: one selected options target configures both the archive and image.
-# Reuse the fallback header; only this explicit target enables local fixtures.
+# One options target configures the archive and image (VR-7).
+# Only this explicit target enables the local fixtures.
 if(PROJECT_IS_TOP_LEVEL AND PICO_TIME_BUILD_FIRMWARE)
     add_library(pico_time_device_lwipopts INTERFACE)
     target_link_libraries(pico_time_device_lwipopts INTERFACE
@@ -129,14 +102,9 @@ if(PICO_TIME_ENABLE_INSTALL)
             "exported headers belong to pico_time_time_sync, which needs the "
             "Pico SDK. A host build has no public surface to install.")
     endif()
-    # pico_time_lwipopts_fallback is in the set because pico_time_time_sync
-    # links it PRIVATE when it is the chosen lwipopts target, and a PRIVATE
-    # dependency of a static library still appears in the link interface under
-    # $<LINK_ONLY:...>. Same reason pico_time_strict is in it.
-    #
-    # pico_time_testing lets a downstream on-target test use this fake. Host
-    # tests
-    # consume it in-tree through FetchContent; the installed export is ARM.
+    # pico_time_strict and the fallback are exported because static-library
+    # PRIVATE dependencies stay in the $<LINK_ONLY:...> interface.
+    # The installed fake serves firmware tests; host tests use in-tree targets.
     set(PICO_TIME_EXPORT_TARGETS
         pico_time_strict pico_time_core pico_time_ntp pico_time_time_sync
         pico_time_testing pico_time_lwipopts_fallback)

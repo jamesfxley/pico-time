@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MIT
-// AR-4 link probe: settimeofday must reach the validated library store.
-// Built with the existing firmware probes; no board or network is required
-// to inspect the resolved setter in the map and symbol table.
+// The linked POSIX setter must reach the validated library store (AR-4).
 #include <sys/time.h>
 
 #include <cerrno>

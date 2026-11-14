@@ -8,5 +8,5 @@ struct LoopbackResult {
     std::string_view detail;
 };
 
-// VR-7: real public synchronization through the lwIP loopback fixture.
+// Public synchronisation runs through the lwIP loopback fixture (VR-7).
 [[nodiscard]] LoopbackResult check_loopback_replies();

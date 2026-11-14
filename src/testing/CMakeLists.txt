@@ -1,10 +1,4 @@
-# Test support in the shipped package, not under tests/: a downstream project
-# driving NtpSynchronizer in its own tests needs the same double this
-# repository's tests use, and a copy in each tree is free to drift from the
-# contract it stands in for (EN-04.1).
-#
-# INTERFACE: the fake is header-only, and its only obligation is the contract in
-# its own documentation.
+# The installed fake serves downstream tests of NtpSynchronizer.
 add_library(pico_time_testing INTERFACE)
 add_library(pico_time::testing ALIAS pico_time_testing)
 

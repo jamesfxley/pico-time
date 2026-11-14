@@ -1,7 +1,4 @@
-# The portable core: the SNTP wire format and the wall-clock arithmetic and
-# publication protocol. No lwIP, no Pico SDK, no logger -- which is what lets
-# the validation rules and the clock be host-tested and fuzzed rather than
-# argued about. It is built in both trees; the firmware library links it.
+# Portable wire validation and clock publication build in both trees.
 add_library(pico_time_core STATIC
     ntp_message.cpp
     wall_clock.cpp
@@ -15,11 +12,8 @@ target_sources(pico_time_core PUBLIC
         include/pico_time/core/epoch.hpp
 )
 
-# ntp_message.hpp and wall_clock.hpp are implementation detail (CXX-13.3): they
-# sit beside the sources that use them and are in no FILE_SET, so they are not
-# installed. PRIVATE rather than PUBLIC for exactly that reason -- on the public
-# build interface they would be includable by an in-tree consumer and absent
-# from the installed package, which compiles here and fails downstream.
+# PRIVATE keeps these headers off the public build interface. The installed
+# package lacks them, so code that compiles in-tree would fail downstream.
 target_include_directories(pico_time_core
     PRIVATE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -29,8 +23,6 @@ target_include_directories(pico_time_core
 )
 
 target_compile_features(pico_time_core PUBLIC cxx_std_20)
-# pico_util::core is PRIVATE: wall_clock.hpp is an internal header of this
-# module -- it is not installed and no public header includes it -- so
-# pico_util::Published reaches nothing outside this target.
+# Published is used only by the private wall_clock.hpp header.
 target_link_libraries(pico_time_core
     PRIVATE pico_time_strict pico_util::core)
