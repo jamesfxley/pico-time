@@ -12,13 +12,15 @@ allowances, `--list` lists gates, and `--all` adds online checks.
 Initialise recursive submodules first. The full workflow environment is:
 
 ```sh
-export HOUSE_MATRIX_SANITIZE=ON
+export HOUSE_MATRIX_SANITIZE=address
 export HOUSE_MATRIX_BOARD=pico2_w
 export HOUSE_MATRIX_LWIPOPTS=pico_time_lwipopts_fallback
 export HOUSE_MATRIX_SSID=placeholder-ssid
 export HOUSE_MATRIX_PASSWORD=placeholder-password
 python3 dev.py check --ci
 ```
+
+The workflow also runs the sanitizer tree with `HOUSE_MATRIX_SANITIZE=thread`.
 
 Set `PICO_SDK_PATH` to your SDK checkout. Firmware needs RP2350 and CYW43.
 The `pico_w` and `pico2` consumer cases check configuration failure.
