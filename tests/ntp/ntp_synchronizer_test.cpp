@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: MIT
-// Scripted retry, timeout and slot-release cases (NR-3, AR-2, AR-6).
+// Scripted retry, timeout and slot-release cases (NR-3, AR-2, AR-6, VR-8).
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <pico_time/ntp/ntp_error.hpp>
 #include <pico_time/ntp/ntp_synchronizer.hpp>
 #include <pico_time/ntp/ntp_transport.hpp>
 #include <pico_time/testing/fake_ntp_transport.hpp>
+#include <span>
+#include <thread>
 #include <vector>
 
 namespace pico_time {
@@ -55,6 +59,103 @@ void arrange_answering(FakeNtpTransport& transport) {
     transport.arrive_on_poll(1, FakeNtpTransport::address(1),
                              good_reply(transport.next_nonce()));
 }
+
+/// A transport whose callbacks arrive from a second thread holding the
+/// transport lock, as lwIP's do when the async context runs on the other core
+/// (VR-8). The lookup lands, then the reply follows once the request is sent.
+class ThreadedNtpTransport final : public INtpTransport {
+   public:
+    static constexpr std::uint64_t NONCE = 0x1122334455667788U;
+    static constexpr auto DELIVERY_BOUND = std::chrono::seconds(5);
+
+    ThreadedNtpTransport() = default;
+    ThreadedNtpTransport(const ThreadedNtpTransport&) = delete;
+    ThreadedNtpTransport& operator=(const ThreadedNtpTransport&) = delete;
+    ThreadedNtpTransport(ThreadedNtpTransport&&) = delete;
+    ThreadedNtpTransport& operator=(ThreadedNtpTransport&&) = delete;
+
+    ~ThreadedNtpTransport() {
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+    }
+
+    void lock() override { mutex_.lock(); }
+
+    void unlock() override { mutex_.unlock(); }
+
+    [[nodiscard]] ResolveStatus resolve(const char* /*host*/,
+                                        NtpAddress& /*address*/,
+                                        IResolveObserver& observer) override {
+        // The caller holds the lock, so the worker's first callback waits for
+        // the caller to finish recording the pending lookup.
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+        worker_ = std::thread([this, &observer] { deliver(observer); });
+        return ResolveStatus::IN_PROGRESS;
+    }
+
+    [[nodiscard]] bool open(IDatagramObserver& observer) override {
+        const std::lock_guard<std::mutex> guard(mutex_);
+        datagram_observer_ = &observer;
+        return true;
+    }
+
+    void close() override {
+        const std::lock_guard<std::mutex> guard(mutex_);
+        datagram_observer_ = nullptr;
+    }
+
+    [[nodiscard]] bool send(
+        const NtpAddress& /*server*/,
+        std::span<const std::uint8_t> /*payload*/) override {
+        sent_.store(true);
+        return true;
+    }
+
+    void poll() override { std::this_thread::yield(); }
+
+    [[nodiscard]] std::uint64_t now_ms() const override {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count());
+    }
+
+    void wait(std::chrono::milliseconds /*duration*/) override {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    [[nodiscard]] std::uint64_t nonce() override { return NONCE; }
+
+   private:
+    void deliver(IResolveObserver& observer) {
+        const NtpAddress server = FakeNtpTransport::address(1);
+        {
+            const std::lock_guard<std::mutex> guard(mutex_);
+            observer.on_resolved(server);
+        }
+        // Bounded: a mainline that never sends leaves the attempt to time out.
+        const auto give_up = std::chrono::steady_clock::now() + DELIVERY_BOUND;
+        while (!sent_.load()) {
+            if (std::chrono::steady_clock::now() >= give_up) {
+                return;
+            }
+            std::this_thread::yield();
+        }
+        const std::lock_guard<std::mutex> guard(mutex_);
+        if (datagram_observer_ != nullptr) {
+            const std::vector<std::uint8_t> reply = good_reply(NONCE);
+            datagram_observer_->on_datagram(server, reply);
+        }
+    }
+
+    std::mutex mutex_;
+    std::thread worker_;
+    std::atomic<bool> sent_{false};
+    IDatagramObserver* datagram_observer_ = nullptr;
+};
 
 TEST(NtpSynchronizer, AcceptsAReplyAndReportsTheTime) {
     FakeNtpTransport transport;
@@ -408,6 +509,17 @@ TEST(NtpSynchronizer, AResolutionLandingUnderTheLockIsSerialized) {
 
     ASSERT_TRUE(result.ok()) << describe(result.error());
     EXPECT_EQ(transport.open_calls(), 1U);
+    EXPECT_EQ(sync.slots_in_use(), 0U);
+}
+
+TEST(NtpSynchronizer, CallbacksFromAnotherThreadUnderTheLockArePublishedVR8) {
+    ThreadedNtpTransport transport;
+    NtpSynchronizer sync(transport, "pool.ntp.org");
+
+    const auto result = sync.synchronize(GENEROUS_TIMEOUT);
+
+    ASSERT_TRUE(result.ok()) << describe(result.error());
+    EXPECT_EQ(result.value().epoch_seconds, EPOCH_SECONDS);
     EXPECT_EQ(sync.slots_in_use(), 0U);
 }
 
