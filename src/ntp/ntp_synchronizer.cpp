@@ -51,8 +51,8 @@ void NtpSynchronizer::Slot::on_resolved(const NtpAddress& address) {
         complete = true;
         return;
     }
-    // The mainline sends after observing address_ready. No allocation or lock
-    // acquisition occurs in this callback (VR-8).
+    // The mainline sends after observing address_ready under the lock. No
+    // allocation or lock acquisition occurs in this callback (VR-8).
     server_address = address;
     address_ready = true;
 }
@@ -134,7 +134,15 @@ std::size_t NtpSynchronizer::slots_in_use() const {
 bool NtpSynchronizer::poll_until(const Slot& slot, std::uint64_t start_ms,
                                  std::uint64_t budget_ms,
                                  bool (*ready)(const Slot&)) {
-    while (!ready(slot)) {
+    // Callbacks write the flags holding the transport lock, so the test of
+    // ready() holds it too (VR-8).
+    const auto is_ready = [this, &slot, ready] {
+        transport_->lock();
+        const bool value = ready(slot);
+        transport_->unlock();
+        return value;
+    };
+    while (!is_ready()) {
         // The loop uses an elapsed unsigned difference, not an absolute
         // deadline. A deadline past a wrapping counter is never reached, and
         // the no-reply wait would never end. A backward clock step instead ends
@@ -181,14 +189,23 @@ NtpError NtpSynchronizer::run_attempt(Slot& slot,
         transport_->close();
         return NtpError::TIMED_OUT;
     }
-    if (slot.complete) {
+
+    // No callback writes these between address_ready and the send, but every
+    // read of callback state takes the lock (VR-8).
+    transport_->lock();
+    const bool finished = slot.complete;
+    const NtpError finished_error = slot.error;
+    const NtpAddress server = slot.server_address;
+    transport_->unlock();
+
+    if (finished) {
         transport_->close();
-        return slot.error;
+        return finished_error;
     }
 
     const std::array<std::uint8_t, NTP_MESSAGE_LENGTH> request =
         build_ntp_request(slot.nonce);
-    if (!transport_->send(slot.server_address, request)) {
+    if (!transport_->send(server, request)) {
         transport_->close();
         return NtpError::SEND_FAILED;
     }
@@ -197,13 +214,17 @@ NtpError NtpSynchronizer::run_attempt(Slot& slot,
         poll_until(slot, start_ms, budget_ms,
                    [](const Slot& state) { return state.complete; });
 
-    // Close before reading sample to prevent another datagram overwriting it.
+    // Close before reading error and sample, so no later datagram overwrites
+    // them. The read takes the lock because close() need not (VR-8).
     transport_->close();
 
     if (!completed) {
         return NtpError::TIMED_OUT;
     }
-    return slot.error;
+    transport_->lock();
+    const NtpError error = slot.error;
+    transport_->unlock();
+    return error;
 }
 
 pico_util::Result<SynchronizedTime, NtpError> NtpSynchronizer::synchronize(
@@ -230,10 +251,10 @@ pico_util::Result<SynchronizedTime, NtpError> NtpSynchronizer::synchronize(
         slot->nonce = transport_->nonce();
 
         const NtpError error = run_attempt(*slot, timeout);
-        const SynchronizedTime sample = slot->sample;
 
         // Serialise release with the resolution callback.
         transport_->lock();
+        const SynchronizedTime sample = slot->sample;
         release_slot(*slot);
         transport_->unlock();
 

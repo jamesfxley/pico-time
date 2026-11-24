@@ -75,8 +75,8 @@ lwIP callbacks meet the blocking caller through a fixed slot pool:
 - Slot claims and releases hold the transport lock. An uncancellable lookup
   retains its slot until both caller and callback finish. `abandoned` records
   that the caller has finished.
-- Plain completion flags rely on the execution model specified for callbacks
-  (VR-8).
+- Callbacks hold the transport lock, and the attempt loop reads the completion
+  flags under it, so plain flags are published on either core (VR-8).
 
 Callbacks do not log. The SDK's `stdout_serialize_begin` can wait up to
 `PICO_STDIO_DEADLOCK_TIMEOUT_MS` while a pre-empted mainline holds `print_mutex`.

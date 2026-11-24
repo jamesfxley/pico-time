@@ -162,17 +162,13 @@ end the attempt.
 (`CXX-08.3`). A callback records an outcome in plain stores and returns;
 sending, reporting and tearing down all happen in the caller's context.
 
-The stores are plain rather than atomic; their correctness rests on the
-execution model, not on the fields. lwIP runs in a single-core background
-context under the `NO_SYS` configuration the adapter asserts, so a callback runs
-to completion with respect to the mainline and there is no interleaving for an
-ordering to protect; the mainline's spin on the published flags cannot be
-hoisted either, because every call in that loop body leaves the translation unit
-through `INtpTransport`. Both conditions are needed for correct publication,
-which is what makes the `NO_SYS` assertion a correctness guard rather than a
-portability note: a pre-emptive arrangement — a second core servicing lwIP, or a
-`NO_SYS=0` build — breaks this silently, and under one the flags must be
-published through `pico_util::Published` as the wall clock's are.
+The stores are plain rather than atomic. With the `NO_SYS` threadsafe
+background configuration the library links, lwIP callbacks run holding the lock
+that the transport's `lock()` takes, and the attempt loop reads every field a
+callback writes under that same lock, so the publication is correct whichever
+core calls `synchronize_ntp()`. The callbacks themselves take no lock; they
+already hold it. The `NO_SYS` assertion guards that premise. The cost is one
+lock and unlock per poll iteration.
 
 The only exception is `pbuf_free()` on the datagram lwIP hands
 the receive callback. The lwIP API requires the callback to release it, and it
@@ -292,7 +288,7 @@ none of them is ours to change.
 | VR-5 | `ntp_message_test.cpp` `NtpMessage.RejectsAnUnsetTransmitTimestamp`, `.RejectsAnUnsetTimestampEvenWithANonZeroFraction` | A zero seconds field is rejected whatever the fraction |
 | VR-6 | `ntp_message_test.cpp` `NtpMessage.RejectsATimestampBelowThePlausibilityFloor`, `.AcceptsATimestampExactlyAtThePlausibilityFloor`, `.AcceptsTheSecondBelowThePlausibilityCeiling`, `.RejectsATimestampAtAndAboveThePlausibilityCeiling` | Both edges classify correctly, and both are reachable from the wire |
 | VR-7 | `ntp_message_test.cpp` `NtpMessage.AnUnauthenticatedDatagramIsOnlyEverAnOriginateMismatch`; `ntp_synchronizer_test.cpp` `ADatagramFromElsewhereDoesNotEndTheAttempt`, `ADatagramTooShortForAMessageDoesNotEndTheAttempt`, `AReplyToAnotherRequestIsDroppedNotCounted`; `tests/device/main.cpp` `lwip-rejects-unrelated-reply-before-valid-reply` | Host checks establish that unauthenticated replies reach only `ORIGINATE_MISMATCH`. The device case delivers wrong-port, short, wrong-originate and wrong-address UDP replies successively to one public synchronisation attempt. A shim on the request's real UDP PCB records exactly one callback per datagram with the expected source address, port and length, then forwards the original arguments to the saved adapter callback unchanged. After each bad datagram is polled, the original endpoint stays open and the clock stays unsynchronised. One valid nonce-matching reply passes through the same shim and synchronises, with exactly one request and a clock value within the public call bracket; the original callback is restored. The device case exercises the port check through the real lwIP adapter. Source address 127.0.0.2 is supplied by `udp_sendto_if_src` over loopback. This covers the lwIP glue, not the CYW43 Wi-Fi path |
-| VR-8 | Review of the lwIP callbacks — `lwip_ntp_transport.cpp` `on_dns_resolved` and the `udp_recv` lambda, `ntp_synchronizer.cpp` `Slot::on_resolved` and `Slot::on_datagram`; the C-heap `nm` gate | No callback contains a `PICO_LOG_*`, a lock acquisition, a send, or an allocation other than the required `pbuf_free`; no object of this library references the C heap. `ntp_client.cpp` is composition, not a callback, and logs deliberately |
+| VR-8 | Review of the lwIP callbacks — `lwip_ntp_transport.cpp` `on_dns_resolved` and the `udp_recv` lambda, `ntp_synchronizer.cpp` `Slot::on_resolved` and `Slot::on_datagram`; `ntp_synchronizer_test.cpp` `CallbacksFromAnotherThreadUnderTheLockArePublishedVR8`, under ThreadSanitizer; the C-heap `nm` gate | No callback contains a `PICO_LOG_*`, a lock acquisition, a send, or an allocation other than the required `pbuf_free`; no object of this library references the C heap. `ntp_client.cpp` is composition, not a callback, and logs deliberately |
 | AR-1 | ctest `pico_time_refuses_discarded_synchronized`; the compiler, through pico-util's `[[nodiscard]]` `Result` | Discarding `is_time_synchronized()` fails to compile with `nodiscard`, while the same call used compiles; every other entry point returns a `Result`, whose discard pico-util marks `[[nodiscard]]`, and warnings are errors |
 | AR-2 | `ntp_synchronizer_test.cpp` `RefusesANonPositiveTimeoutWithoutTouchingTheNetwork`; review of `ntp_client.cpp` `synchronize_ntp` for the ceiling and the order | A zero and a negative timeout are each rejected with `INVALID_TIMEOUT` before any network call. The `MAX_SYNC_TIMEOUT` ceiling is review-only: it bounds how long a caller may surrender its core, which is a policy of the public entry point rather than of the transport-agnostic synchronizer |
 | AR-3 | Review of `time_keeper.cpp` `apply_wall_clock_time` | It returns `MICROSECONDS_INVALID` for an out-of-range microseconds field and `EPOCH_OUT_OF_RANGE` for an out-of-window epoch, so a caller who passed microseconds-since-epoch into the seconds argument can find that mistake. Review-only: `pico_time_time_sync` is not in the host build — it compiles lwIP and SDK sources — so the only other reference is the firmware consumer smoke build, `tests/consumer/consumer_smoke.cxx`, where linking is the assertion |

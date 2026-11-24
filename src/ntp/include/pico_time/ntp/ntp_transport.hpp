@@ -87,8 +87,9 @@ class INtpTransport {
     INtpTransport(INtpTransport&&) = delete;
     INtpTransport& operator=(INtpTransport&&) = delete;
 
-    /// Hold while accessing callback state to serialise slot claims and
-    /// releases.
+    /// Hold while accessing callback state, to serialise slot claims and
+    /// releases and to publish what callbacks write. The lwIP adapter's
+    /// callbacks run holding it.
     virtual void lock() = 0;
     /// Release the lock taken by lock().
     virtual void unlock() = 0;
