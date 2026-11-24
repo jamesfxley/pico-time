@@ -51,8 +51,8 @@ class NtpSynchronizer {
 
    private:
     /// State retained until both the caller and the resolution callback finish.
-    /// Plain fields rely on single-core callbacks with NO_SYS enabled.
-    /// The lwIP adapter asserts NO_SYS.
+    /// Callbacks write the fields with the transport lock held, and the
+    /// attempt loop reads them under the same lock.
     class Slot final : public IResolveObserver, public IDatagramObserver {
        public:
         void on_resolved(const NtpAddress& address) override;
