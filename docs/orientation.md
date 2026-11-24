@@ -126,7 +126,9 @@ Shared policy is routed through the [pinned family guides](../infra/agents/AGENT
   explains the explicit options target (CXX-10.3).
 - `misc-include-cleaner` does not attribute option macros to `<lwip/opt.h>`.
   The option assertion has a site suppression, and the header has a trailing
-  `IWYU pragma: keep`. That pragma must stay on the include line. Testing
+  `IWYU pragma: keep`. That pragma must stay on the include line. The lwIP
+  adapter also includes `<lwipopts.h>` directly, for the `LWIP_IPV4` and
+  `LWIP_IPV6` tests in its address encoding. Testing
   `NO_SYS` against zero avoids the preprocessed `1 == 1` diagnostic.
 - Suppression placement follows
   [EN-00.4](../infra/house/standard/engineering/00-conformance.md). A justification
