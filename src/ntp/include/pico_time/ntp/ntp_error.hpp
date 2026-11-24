@@ -22,7 +22,8 @@ enum class NtpError : std::uint8_t {
     SEND_FAILED,    ///< Sending or buffer allocation failed.
     TIMED_OUT,      ///< No acceptable reply inside the caller's budget.
 
-    // Rejected replies end the attempt. Nonce mismatches are dropped (VR-7).
+    // Rejected replies end the call (NR-3). Nonce mismatches are dropped
+    // (VR-7).
     REJECTED_MODE,            ///< Not a server reply.
     REJECTED_LEAP_ALARM,      ///< The server's own clock is unset.
     REJECTED_STRATUM,         ///< Kiss-o'-Death, unsynchronised, reserved.
