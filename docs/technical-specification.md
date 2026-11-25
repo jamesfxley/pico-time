@@ -322,9 +322,9 @@ with the missing option; it cannot establish loopback evidence. Loopback needs
 no Wi-Fi join and does not cover the Wi-Fi path. Wi-Fi validation uses
 `examples/ntp_sync/`. Both tiers require hardware; a firmware build does not
 establish a device pass (`EN-06.6`).
-Device evidence is recorded in the pull request (FW-3). Rows marked **Review** state a structural property of a
-firmware-only translation unit that no host test can reach; they are checked by
-the
-pinned source review guide (`infra/house/guides/review/source.md`).
+Device evidence is recorded in the pull request (FW-3). A row that names a
+review states a structural property, in host or firmware code, that no test
+checks; it is checked by the pinned source review guide
+(`infra/house/guides/review/source.md`).
 
 Requirement citations are checked by review (EN-02.1).
