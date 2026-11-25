@@ -15,8 +15,9 @@ namespace pico_time {
 /// Capacity of the transport address representation, in bytes.
 inline constexpr std::size_t NTP_ADDRESS_BYTES = 20;
 
-/// Resolve and receive paths must use identical bytes for equal endpoints,
-/// including padding. The address is opaque to the attempt loop.
+/// Equal endpoints must give equal bytes on the resolve and receive paths,
+/// because the attempt loop compares addresses byte for byte. The address is
+/// opaque to the attempt loop.
 struct NtpAddress {
     /// The address, in the transport's own representation.
     alignas(std::uint32_t) std::array<std::uint8_t, NTP_ADDRESS_BYTES> opaque{};

@@ -6,11 +6,15 @@ extern "C" {
 #include <lwip/arch.h>
 #include <lwip/dns.h>
 #include <lwip/err.h>
+#include <lwip/ip4_addr.h>
 #include <lwip/ip_addr.h>
 // misc-include-cleaner does not attribute option macros to opt.h.
 #include <lwip/opt.h>  // IWYU pragma: keep
 #include <lwip/pbuf.h>
 #include <lwip/udp.h>
+// The address encoding tests LWIP_IPV4, which misc-include-cleaner attributes
+// to the options header.
+#include <lwipopts.h>
 }
 
 #include <pico/cyw43_arch.h>
@@ -44,31 +48,79 @@ constexpr std::uint64_t US_PER_MS = 1000;
 
 // NtpAddress is an opaque blob to everything above the seam, which is what
 // keeps ip_addr_t out of the policy's headers. This is the one place the two
-// spellings meet, so this is where the size has to hold.
+// spellings meet.
 //
-// It is also what keeps the policy's byte comparison of two addresses honest,
-// which is the less obvious of its two jobs. An ip_addr_t large enough to fail
-// this is a dual-stack one carrying a zone field, which is exactly the
-// configuration whose bytes stop being canonical for a given endpoint. So the
-// comparison is sound below this bound and refused above it, and widening
-// NtpAddress::opaque without reading the sender check in ntp_synchronizer.cpp
-// would trade a build error for a silent one.
-static_assert(sizeof(ip_addr_t) <= sizeof(NtpAddress::opaque),
-              "NtpAddress::opaque is too small for this lwIP configuration's "
-              "ip_addr_t; widen it in ntp_transport.hpp");
+// The synchroniser compares NtpAddress bytes to decide whether a datagram came
+// from the server it asked. The raw bytes of an ip_addr_t are not used for
+// that: lwIP does not document the value of its padding or of the union bytes
+// an IPv4 address leaves unused. The encoding below writes only the address
+// type and the address into zeroed bytes, so equal endpoints give equal bytes
+// in IPv4-only, IPv6-only and dual-stack configurations.
+//
+// The IPv6 zone is not encoded. With LWIP_IPV6_SCOPES, lwIP gives a received
+// link-local source the interface's zone but leaves a DNS result without one,
+// so encoding it would make a link-local server's replies never match. The
+// request is sent to the DNS result, which carries no zone either.
+//
+// Layout: the address type, then the 16 address bytes (an IPv4 address fills
+// the first four, the rest stay zero).
+constexpr std::size_t TYPE_OFFSET = 0;
+constexpr std::size_t ADDRESS_OFFSET = TYPE_OFFSET + 1;
+constexpr std::size_t ADDRESS_BYTES = 16;
+constexpr std::size_t ENCODED_BYTES = ADDRESS_OFFSET + ADDRESS_BYTES;
 
-// The opaque array and ip_addr_t can differ in size, so bit_cast does not
-// apply.
+static_assert(ENCODED_BYTES <= NTP_ADDRESS_BYTES,
+              "NtpAddress::opaque is too small for the encoded address; "
+              "widen NTP_ADDRESS_BYTES in ntp_transport.hpp");
+#if LWIP_IPV4
+static_assert(sizeof(ip4_addr_t) <= ADDRESS_BYTES,
+              "an IPv4 address does not fit the encoded address bytes");
+#endif
+#if LWIP_IPV6
+static_assert(sizeof(ip6_addr_t::addr) == ADDRESS_BYTES,
+              "the IPv6 address words are not the encoded address bytes");
+#endif
+
 [[nodiscard]] NtpAddress to_opaque(const ip_addr_t& address) {
-    NtpAddress out;
-    std::memcpy(out.opaque.data(), &address, sizeof(ip_addr_t));
+    NtpAddress out{};
+    const std::span<std::uint8_t> bytes{out.opaque};
+    const std::span<std::uint8_t> payload =
+        bytes.subspan(ADDRESS_OFFSET, ADDRESS_BYTES);
     out.valid = true;
+#if LWIP_IPV6
+    if (IP_IS_V6_VAL(address)) {
+        const ip6_addr_t* const v6 = ip_2_ip6(&address);
+        bytes[TYPE_OFFSET] = IPADDR_TYPE_V6;
+        std::memcpy(payload.data(), v6->addr, sizeof(v6->addr));
+        return out;
+    }
+#endif
+#if LWIP_IPV4
+    const ip4_addr_t* const v4 = ip_2_ip4(&address);
+    bytes[TYPE_OFFSET] = IPADDR_TYPE_V4;
+    std::memcpy(payload.data(), &v4->addr, sizeof(v4->addr));
+#endif
     return out;
 }
 
 [[nodiscard]] ip_addr_t from_opaque(const NtpAddress& address) {
     ip_addr_t out{};
-    std::memcpy(&out, address.opaque.data(), sizeof(ip_addr_t));
+    const std::span<const std::uint8_t> bytes{address.opaque};
+    const std::span<const std::uint8_t> payload =
+        bytes.subspan(ADDRESS_OFFSET, ADDRESS_BYTES);
+#if LWIP_IPV6
+    if (bytes[TYPE_OFFSET] == IPADDR_TYPE_V6) {
+        ip6_addr_t v6{};
+        std::memcpy(v6.addr, payload.data(), sizeof(v6.addr));
+        ip_addr_copy_from_ip6(out, v6);
+        return out;
+    }
+#endif
+#if LWIP_IPV4
+    ip4_addr_t v4{};
+    std::memcpy(&v4.addr, payload.data(), sizeof(v4.addr));
+    ip_addr_copy_from_ip4(out, v4);
+#endif
     return out;
 }
 
