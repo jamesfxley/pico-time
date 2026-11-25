@@ -151,12 +151,14 @@ ceiling no message can reach is a check that cannot fail.
 or that fails VR-4, does not end the attempt in progress. The client continues
 waiting for a valid reply until its timeout.
 
-VR-4 running first is what makes this cover every unauthenticated datagram
-rather than only the ones that are otherwise well-formed: a forged or replayed
-packet cannot deny a synchronisation that would otherwise have succeeded,
-whatever else is wrong with it. A reply that passes VR-4 and then fails VR-1,
-VR-2, VR-3, VR-5 or VR-6 is a real server reporting an unusable state, and does
-end the attempt.
+VR-4 running first makes this cover every datagram from a sender that has not
+seen the request, not only the well-formed ones: such a datagram cannot deny a
+synchronisation that would otherwise have succeeded, whatever else is wrong
+with it. A reply that passes VR-4 and then fails VR-1, VR-2, VR-3, VR-5 or VR-6
+ends the attempt. Passing VR-4 shows only that the sender saw the request. The
+nonce travels in clear, so a host that sees the request can echo it in a reply
+that fails a later check, and that reply ends the attempt. The on-wire checks
+"do not securely identify and authenticate servers to clients" (RFC 5905 §15).
 
 **VR-8.** No lwIP callback logs, blocks, takes a lock, or allocates
 (`CXX-08.3`). A callback records an outcome in plain stores and returns;
