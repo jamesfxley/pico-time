@@ -97,7 +97,8 @@ transmit timestamp.
 
 **NR-3.** `synchronize_ntp()` makes at most three attempts. Each attempt is
 bounded by the caller's timeout, and consecutive attempts are separated by a
-one-second delay.
+one-second delay. An attempt that fails with an error `retryable()` classes as
+not retryable ends the call without a further attempt.
 
 **NR-4.** `synchronize_ntp()` succeeds immediately, without network traffic,
 when the clock is already synchronised.
@@ -151,12 +152,14 @@ ceiling no message can reach is a check that cannot fail.
 or that fails VR-4, does not end the attempt in progress. The client continues
 waiting for a valid reply until its timeout.
 
-VR-4 running first is what makes this cover every unauthenticated datagram
-rather than only the ones that are otherwise well-formed: a forged or replayed
-packet cannot deny a synchronisation that would otherwise have succeeded,
-whatever else is wrong with it. A reply that passes VR-4 and then fails VR-1,
-VR-2, VR-3, VR-5 or VR-6 is a real server reporting an unusable state, and does
-end the attempt.
+VR-4 running first makes this cover every datagram from a sender that has not
+seen the request, not only the well-formed ones: such a datagram cannot deny a
+synchronisation that would otherwise have succeeded, whatever else is wrong
+with it. A reply that passes VR-4 and then fails VR-1, VR-2, VR-3, VR-5 or VR-6
+ends the attempt. Passing VR-4 shows only that the sender saw the request. The
+nonce travels in clear, so a host that sees the request can echo it in a reply
+that fails a later check, and that reply ends the attempt. The on-wire checks
+"do not securely identify and authenticate servers to clients" (RFC 5905 §15).
 
 **VR-8.** No lwIP callback logs, blocks, takes a lock, or allocates
 (`CXX-08.3`). A callback records an outcome in plain stores and returns;
@@ -219,10 +222,13 @@ still held by a DNS lookup that has not landed. The pool holds
 `MAX_REQUEST_ATTEMPTS` slots, and a slot outlives its attempt only while a
 lookup it cannot cancel is in flight (VR-8). The condition is transient, so
 `retryable()` reports it as such: a caller that cannot distinguish it from a
-network failure gives up on a state that was about to clear.
+network failure gives up on a state that clears when the lookups land.
 
-lwIP calls every lookup back, with a null address on failure, and that callback
-releases the slot, so a caller that retries after a few seconds succeeds.
+lwIP calls back every lookup that returned `ERR_INPROGRESS`, on success,
+failure or timeout, with a null address on failure, and that callback releases
+the slot. Once one held slot's lookup has landed, the next call does not fail
+with `NO_ATTEMPT_SLOT`; it can still fail for any other reason. lwIP states no
+bound on when the callback runs.
 
 **AR-7.** Configuration fails for a board without an RP2350 and the CYW43 radio.
 Synchronisation runs over the radio, and pico-logging needs the RP2350's
@@ -281,7 +287,7 @@ none of them is ours to change.
 | FR-8 | `ntp_message_test.cpp` `NtpMessage.ThePlausibilityWindowIsNarrowerThanAnNtpEra`, `.RefusesEveryEra1FieldWhileTheWindowPredatesTheRollover` | The window is narrower than an era, and a window below the rollover admits no era-1 field |
 | NR-1 | `ntp_message_test.cpp` `NtpMessage.BuildsAClientRequestCarryingTheNonce` | First byte is 0x1B |
 | NR-2 | `ntp_message_test.cpp` `NtpMessage.BuildsAClientRequestCarryingTheNonce`; `ntp_synchronizer_test.cpp` `NtpSynchronizer.GivesEachAttemptItsOwnNonce` | The nonce occupies bytes 40–47 big-endian, and a fresh one is drawn for each attempt. That the request sent carries the attempt's own nonce is review-only, of `ntp_synchronizer.cpp` |
-| NR-3 | `ntp_synchronizer_test.cpp` `TriesEveryAttemptBeforeGivingUp`, `WaitsBetweenAttemptsButNotAfterTheLast` | An unreachable server is retried `MAX_REQUEST_ATTEMPTS` times with `MAX_REQUEST_ATTEMPTS - 1` waits between them and none after the last. The retry structure is transport-independent. No device run is kept for it |
+| NR-3 | `ntp_synchronizer_test.cpp` `TriesEveryAttemptBeforeGivingUp`, `WaitsBetweenAttemptsButNotAfterTheLast`, `ARefusedReplyReportsWhyRatherThanTimingOut`, `ARejectionEndsTheCallWithoutASecondAttempt`, `ARejectionAfterATimeoutEndsTheCall`, `EveryRejectedReplyEndsTheCallAfterOneSend` | An unreachable server is retried `MAX_REQUEST_ATTEMPTS` times with `MAX_REQUEST_ATTEMPTS - 1` waits between them and none after the last. A reply rejected with any `REJECTED_*` code reachable from a scripted reply ends the call with that code, with no further send, no further `RETRY_DELAY` wait and no slot held, whether it answers attempt 1 or a later attempt. The retry structure is transport-independent. No device run is kept for it |
 | NR-4 | Device run | A second call returns without a DNS query. The run on this release is pending (FW-3). Direct duration and packet capture are absent (FW-2) |
 | NR-5 | `ntp_message_test.cpp` `NtpMessage.RefusesEveryEra1FieldWhileTheWindowPredatesTheRollover`, `.AcceptsATimestampExactlyAtThePlausibilityFloor`, `.AcceptsTheSecondBelowThePlausibilityCeiling` | Both sides of the era boundary are rejected under this window; both edges of the window are accepted through era 0 |
 | NR-6 | `ntp_message_test.cpp` `NtpMessage.ConvertsTheFractionExactly`; `arm-none-eabi-nm -u` over this library's objects | The conversion table holds at 0, ¼, ½, ¾ and full scale; no `__aeabi_[df]` symbol is referenced |
@@ -319,9 +325,9 @@ with the missing option; it cannot establish loopback evidence. Loopback needs
 no Wi-Fi join and does not cover the Wi-Fi path. Wi-Fi validation uses
 `examples/ntp_sync/`. Both tiers require hardware; a firmware build does not
 establish a device pass (`EN-06.6`).
-Device evidence is recorded in the pull request (FW-3). Rows marked **Review** state a structural property of a
-firmware-only translation unit that no host test can reach; they are checked by
-the
-pinned source review guide (`infra/house/guides/review/source.md`).
+Device evidence is recorded in the pull request (FW-3). A row that names a
+review states a structural property, in host or firmware code, that no test
+checks; it is checked by the pinned source review guide
+(`infra/house/guides/review/source.md`).
 
 Requirement citations are checked by review (EN-02.1).

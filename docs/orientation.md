@@ -137,5 +137,6 @@ Shared policy is routed through the [pinned family guides](../infra/agents/AGENT
   from its suppression.
 - `NtpError` reaches the caller, and `retryable()` classifies transient errors
   (AR-6). `NtpReject` remains private and maps to public errors through
-  `from_reject()`. A rejected reply ends one attempt; later attempts can succeed.
-  DNS does not guarantee a different pool server on each lookup.
+  `from_reject()`. A rejected reply ends the call without a further attempt,
+  because the server reports the same state again. DNS does not guarantee a
+  different pool server on each lookup.

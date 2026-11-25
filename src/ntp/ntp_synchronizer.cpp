@@ -241,6 +241,10 @@ pico_util::Result<SynchronizedTime, NtpError> NtpSynchronizer::synchronize(
             return sample;
         }
         last = error;
+        // An error that retryable() rules out would recur (NR-3).
+        if (!retryable(error)) {
+            return error;
+        }
 
         if (attempt + 1 < MAX_REQUEST_ATTEMPTS) {
             transport_->wait(RETRY_DELAY);

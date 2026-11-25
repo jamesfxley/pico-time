@@ -95,8 +95,8 @@ and direct setters, including bounds and the single-writer contract.
 A reply must have server mode, no leap alarm, a usable stratum, the request
 nonce in its originate field, a non-zero transmit timestamp and a time inside
 the plausibility window. A nonce mismatch is dropped without ending the attempt.
-Other validation failures end that attempt. If no attempt succeeds, the call
-returns the last attempt's error. The
+Other validation failures end the call without a further attempt. If no attempt
+succeeds, the call returns the last attempt's error. The
 [NTP exchange](docs/architecture.md#the-ntp-exchange) explains the validation
 order.
 
