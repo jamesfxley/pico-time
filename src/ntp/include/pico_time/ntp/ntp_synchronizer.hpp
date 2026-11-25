@@ -40,7 +40,8 @@ class NtpSynchronizer {
     NtpSynchronizer(INtpTransport& transport, const char* server)
         : transport_(&transport), server_(server) {}
 
-    /// Run up to MAX_REQUEST_ATTEMPTS exchanges, each bounded by timeout.
+    /// Run up to MAX_REQUEST_ATTEMPTS exchanges, each bounded by timeout. The
+    /// call ends at the first error that retryable() classes as not retryable.
     /// \return the time or last error. NO_ATTEMPT_SLOT returns immediately
     /// (AR-6).
     [[nodiscard]] pico_util::Result<SynchronizedTime, NtpError> synchronize(

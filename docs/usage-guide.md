@@ -52,7 +52,8 @@ if (const auto synced = pico_time::synchronize_ntp(); !synced.ok()) {
 ```
 
 `synchronize_ntp()` blocks for up to three exchanges, each bounded by the
-timeout, with one-second delays between them. If all three attempts time out,
+timeout, with one-second delays between them. A rejected reply ends the call
+without a further exchange. If all three attempts time out,
 the call blocks for about three timeouts plus two seconds. The default timeout
 is ten seconds. The call returns `pico_util::Result<void, NtpError>` and
 succeeds immediately if the clock is already set. Invalid timeouts and slot

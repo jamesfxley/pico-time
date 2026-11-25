@@ -97,7 +97,8 @@ transmit timestamp.
 
 **NR-3.** `synchronize_ntp()` makes at most three attempts. Each attempt is
 bounded by the caller's timeout, and consecutive attempts are separated by a
-one-second delay.
+one-second delay. An attempt that fails with an error `retryable()` classes as
+not retryable ends the call without a further attempt.
 
 **NR-4.** `synchronize_ntp()` succeeds immediately, without network traffic,
 when the clock is already synchronised.
@@ -286,7 +287,7 @@ none of them is ours to change.
 | FR-8 | `ntp_message_test.cpp` `NtpMessage.ThePlausibilityWindowIsNarrowerThanAnNtpEra`, `.RefusesEveryEra1FieldWhileTheWindowPredatesTheRollover` | The window is narrower than an era, and a window below the rollover admits no era-1 field |
 | NR-1 | `ntp_message_test.cpp` `NtpMessage.BuildsAClientRequestCarryingTheNonce` | First byte is 0x1B |
 | NR-2 | `ntp_message_test.cpp` `NtpMessage.BuildsAClientRequestCarryingTheNonce`; `ntp_synchronizer_test.cpp` `NtpSynchronizer.GivesEachAttemptItsOwnNonce` | The nonce occupies bytes 40–47 big-endian, and a fresh one is drawn for each attempt. That the request sent carries the attempt's own nonce is review-only, of `ntp_synchronizer.cpp` |
-| NR-3 | `ntp_synchronizer_test.cpp` `TriesEveryAttemptBeforeGivingUp`, `WaitsBetweenAttemptsButNotAfterTheLast` | An unreachable server is retried `MAX_REQUEST_ATTEMPTS` times with `MAX_REQUEST_ATTEMPTS - 1` waits between them and none after the last. The retry structure is transport-independent. No device run is kept for it |
+| NR-3 | `ntp_synchronizer_test.cpp` `TriesEveryAttemptBeforeGivingUp`, `WaitsBetweenAttemptsButNotAfterTheLast`, `ARefusedReplyReportsWhyRatherThanTimingOut`, `ARejectionEndsTheCallWithoutASecondAttempt`, `ARejectionAfterATimeoutEndsTheCall`, `EveryRejectedReplyEndsTheCallAfterOneSend` | An unreachable server is retried `MAX_REQUEST_ATTEMPTS` times with `MAX_REQUEST_ATTEMPTS - 1` waits between them and none after the last. A reply rejected with any `REJECTED_*` code reachable from a scripted reply ends the call with that code, with no further send, no further `RETRY_DELAY` wait and no slot held, whether it answers attempt 1 or a later attempt. The retry structure is transport-independent. No device run is kept for it |
 | NR-4 | Device run | A second call returns without a DNS query. The run on this release is pending (FW-3). Direct duration and packet capture are absent (FW-2) |
 | NR-5 | `ntp_message_test.cpp` `NtpMessage.RefusesEveryEra1FieldWhileTheWindowPredatesTheRollover`, `.AcceptsATimestampExactlyAtThePlausibilityFloor`, `.AcceptsTheSecondBelowThePlausibilityCeiling` | Both sides of the era boundary are rejected under this window; both edges of the window are accepted through era 0 |
 | NR-6 | `ntp_message_test.cpp` `NtpMessage.ConvertsTheFractionExactly`; `arm-none-eabi-nm -u` over this library's objects | The conversion table holds at 0, ¼, ½, ¾ and full scale; no `__aeabi_[df]` symbol is referenced |

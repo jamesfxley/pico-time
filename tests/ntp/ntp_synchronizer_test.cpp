@@ -193,7 +193,7 @@ TEST(NtpSynchronizer, ASendFailureEndsTheAttempt) {
     EXPECT_TRUE(retryable(result.error()));
 }
 
-// Exhausted attempts report the final rejection.
+// A rejection ends the call at once, so its reason is reported, not a timeout.
 TEST(NtpSynchronizer, ARefusedReplyReportsWhyRatherThanTimingOut) {
     FakeNtpTransport transport;
     transport.set_resolve_result(ResolveStatus::RESOLVED);
@@ -211,11 +211,11 @@ TEST(NtpSynchronizer, ARefusedReplyReportsWhyRatherThanTimingOut) {
     EXPECT_EQ(result.error(), NtpError::REJECTED_MODE);
     // Reply rejection is classified as non-retryable.
     EXPECT_FALSE(retryable(result.error()));
-    EXPECT_EQ(transport.send_calls(), MAX_REQUEST_ATTEMPTS);
+    EXPECT_EQ(transport.send_calls(), 1U);
 }
 
-// A later attempt can succeed after an earlier reply is rejected.
-TEST(NtpSynchronizer, ARejectionOnOneAttemptDoesNotEndTheCall) {
+// NR-3: a rejection ends the call, so the server is not asked again.
+TEST(NtpSynchronizer, ARejectionEndsTheCallWithoutASecondAttempt) {
     FakeNtpTransport transport;
     transport.set_resolve_result(ResolveStatus::RESOLVED);
     std::vector<std::uint8_t> refused = good_reply(1);
@@ -226,9 +226,98 @@ TEST(NtpSynchronizer, ARejectionOnOneAttemptDoesNotEndTheCall) {
 
     const auto result = sync.synchronize(GENEROUS_TIMEOUT);
 
-    ASSERT_TRUE(result.ok()) << describe(result.error());
-    EXPECT_EQ(result.value().epoch_seconds, EPOCH_SECONDS);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.error(), NtpError::REJECTED_STRATUM);
+    EXPECT_EQ(transport.open_calls(), 1U);
+    EXPECT_EQ(transport.send_calls(), 1U);
+    for (const auto wait : transport.waits()) {
+        EXPECT_NE(wait, RETRY_DELAY);
+    }
+    EXPECT_EQ(sync.slots_in_use(), 0U);
+}
+
+// NR-3: a rejection on a later attempt also ends the call.
+TEST(NtpSynchronizer, ARejectionAfterATimeoutEndsTheCall) {
+    FakeNtpTransport transport;
+    transport.set_resolve_result(ResolveStatus::RESOLVED);
+    // Attempt 2's refusal arrives on every poll: attempt 1 drops each copy
+    // for its nonce and times out; attempt 2 takes the first one after its
+    // send.
+    std::vector<std::uint8_t> refused = good_reply(2);
+    refused[1] = 0;  // stratum 0: Kiss-o'-Death (VR-3)
+    const std::size_t polls = (2 * (SHORT_TIMEOUT / POLL_DELAY)) + 2;
+    for (std::size_t poll = 1; poll <= polls; ++poll) {
+        transport.arrive_on_poll(poll, FakeNtpTransport::address(1), refused);
+    }
+    NtpSynchronizer sync(transport, "pool.ntp.org");
+
+    const auto result = sync.synchronize(SHORT_TIMEOUT);
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.error(), NtpError::REJECTED_STRATUM);
+    EXPECT_EQ(transport.open_calls(), 2U);
     EXPECT_EQ(transport.send_calls(), 2U);
+    std::size_t retry_waits = 0;
+    for (const auto wait : transport.waits()) {
+        if (wait == RETRY_DELAY) {
+            ++retry_waits;
+        }
+    }
+    EXPECT_EQ(retry_waits, 1U);
+    EXPECT_EQ(sync.slots_in_use(), 0U);
+}
+
+// NR-3: each reachable REJECTED_* code ends the call after one send.
+TEST(NtpSynchronizer, EveryRejectedReplyEndsTheCallAfterOneSend) {
+    // Leap indicator 3, version 4, mode 4 (server).
+    constexpr std::uint8_t LEAP_ALARM_FLAGS = 0xE4;
+    // One second past the NTP epoch: no era places it in the window (VR-6).
+    constexpr std::uint32_t IMPLAUSIBLE_SECONDS = 1U;
+
+    std::vector<std::uint8_t> mode = good_reply(1);
+    mode[0] = 0x23;  // mode 3
+    std::vector<std::uint8_t> leap_alarm = good_reply(1);
+    leap_alarm[0] = LEAP_ALARM_FLAGS;
+    std::vector<std::uint8_t> stratum = good_reply(1);
+    stratum[1] = 0;  // Kiss-o'-Death (VR-3)
+    std::vector<std::uint8_t> zero_timestamp = good_reply(1);
+    for (std::size_t i = 0; i < 4; ++i) {
+        zero_timestamp[TRANSMIT_OFFSET + i] = 0;
+    }
+    std::vector<std::uint8_t> implausible = good_reply(1);
+    for (std::size_t i = 0; i < 4; ++i) {
+        implausible[TRANSMIT_OFFSET + i] =
+            static_cast<std::uint8_t>(IMPLAUSIBLE_SECONDS >> (24 - (8 * i)));
+    }
+
+    struct Case {
+        NtpError error;
+        std::vector<std::uint8_t> reply;
+    };
+
+    const std::array<Case, 5> cases = {{
+        {.error = NtpError::REJECTED_MODE, .reply = mode},
+        {.error = NtpError::REJECTED_LEAP_ALARM, .reply = leap_alarm},
+        {.error = NtpError::REJECTED_STRATUM, .reply = stratum},
+        {.error = NtpError::REJECTED_TIMESTAMP_ZERO, .reply = zero_timestamp},
+        {.error = NtpError::REJECTED_TIMESTAMP_IMPLAUSIBLE,
+         .reply = implausible},
+    }};
+    for (const Case& test_case : cases) {
+        SCOPED_TRACE(describe(test_case.error));
+        FakeNtpTransport transport;
+        transport.set_resolve_result(ResolveStatus::RESOLVED);
+        transport.arrive_on_poll(1, FakeNtpTransport::address(1),
+                                 test_case.reply);
+        NtpSynchronizer sync(transport, "pool.ntp.org");
+
+        const auto result = sync.synchronize(GENEROUS_TIMEOUT);
+
+        ASSERT_FALSE(result.ok());
+        EXPECT_EQ(result.error(), test_case.error);
+        EXPECT_EQ(transport.send_calls(), 1U);
+        EXPECT_EQ(sync.slots_in_use(), 0U);
+    }
 }
 
 TEST(NtpSynchronizer, ADatagramFromElsewhereDoesNotEndTheAttempt) {
